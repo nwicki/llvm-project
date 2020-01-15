@@ -103,6 +103,13 @@
 #include <utility>
 #include <vector>
 
+// Start Region: Implementation Control-flow Analysis
+#include <iostream>
+#include "llvm/Analysis/PostDominators.h"
+#include <stack>
+#include <tuple>
+// End Region: Implementation Control-flow Analysis
+
 using namespace llvm;
 
 // External symbol to be used when generating the shadow address for
@@ -352,6 +359,16 @@ class DataFlowSanitizer : public ModulePass {
   FunctionCallee DFSanSetLabelFn;
   FunctionCallee DFSanNonzeroLabelFn;
   FunctionCallee DFSanVarargWrapperFn;
+// Start Region: Implementation Control-flow Analysis
+  FunctionType *DFSanControlEnterFnTy;
+  FunctionType *DFSanControlLeaveFnTy;
+  FunctionType *DFSanControlScopeLabelFnTy;
+  FunctionType *DFSanGetLabelFnTy;
+  FunctionCallee DFSanControlEnterFn;
+  FunctionCallee DFSanControlLeaveFn;
+  FunctionCallee DFSanControlScopeLabelFn;
+  FunctionCallee DFSanGetLabelFn;
+// End Region: Implementation Control-flow Analysis
   MDNode *ColdCallWeights;
   DFSanABIList ABIList;
   DenseMap<Value *, Function *> UnwrappedFnMap;
@@ -398,6 +415,11 @@ struct DFSanFunction {
   DenseSet<Instruction *> SkipInsts;
   std::vector<Value *> NonZeroChecks;
   bool AvoidNewBlocks;
+// Start Region: Implementation Control-flow Analysis
+  PostDominatorTree PDT;
+  std::stack<std::tuple<Instruction *,BasicBlock *>> ScopeInstructions;
+// End Region: Implementation Control-flow Analysis
+
 
   struct CachedCombinedShadow {
     BasicBlock *Block;
@@ -410,6 +432,11 @@ struct DFSanFunction {
   DFSanFunction(DataFlowSanitizer &DFS, Function *F, bool IsNativeABI)
       : DFS(DFS), F(F), IA(DFS.getInstrumentedABI()), IsNativeABI(IsNativeABI) {
     DT.recalculate(*F);
+
+// Start Region: Implementation Control-flow Analysis
+    PDT.recalculate(*F);
+// End Region: Implementation Control-flow Analysis
+
     // FIXME: Need to track down the register allocator issue which causes poor
     // performance in pathological cases with large numbers of basic blocks.
     AvoidNewBlocks = F->size() > 1000;
@@ -583,6 +610,18 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
       Type::getVoidTy(*Ctx), None, /*isVarArg=*/false);
   DFSanVarargWrapperFnTy = FunctionType::get(
       Type::getVoidTy(*Ctx), Type::getInt8PtrTy(*Ctx), /*isVarArg=*/false);
+// Start Region: Implementation Control-flow Analysis
+  Type *DFSanControlEnterArgs[1] { ShadowTy };
+  Type *DFSanGetLabelArgs[1] = { IntptrTy };
+  DFSanControlEnterFnTy =
+      FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlEnterArgs, /*isVarArg=*/false);
+  DFSanControlLeaveFnTy =
+      FunctionType::get(Type::getVoidTy(*Ctx), None, /*isVarArg=*/false);
+  DFSanControlScopeLabelFnTy =
+      FunctionType::get(ShadowTy, None, /*isVarArg=*/false);
+  DFSanGetLabelFnTy =
+      FunctionType::get(ShadowTy, DFSanGetLabelArgs, /*isVarArg=*/false);
+// End Region: Implementation Control-flow Analysis
 
   if (GetArgTLSPtr) {
     Type *ArgTLSTy = ArrayType::get(ShadowTy, 64);
@@ -782,6 +821,34 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
       Mod->getOrInsertFunction("__dfsan_nonzero_label", DFSanNonzeroLabelFnTy);
   DFSanVarargWrapperFn = Mod->getOrInsertFunction("__dfsan_vararg_wrapper",
                                                   DFSanVarargWrapperFnTy);
+// Start Region: Implementation Control-flow Analysis
+  {
+    AttributeList AL;
+    AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
+    DFSanControlEnterFn =
+        Mod->getOrInsertFunction("__dfsan_control_enter", DFSanControlEnterFnTy, AL);
+  }
+    /*AttributeList AL;
+    AL = AL.addAttribute(M.getContext(), AttributeList::FunctionIndex,
+                         Attribute::NoUnwind);
+    AL = AL.addAttribute(M.getContext(), AttributeList::FunctionIndex,
+                         Attribute::ReadNone);*/
+    DFSanControlLeaveFn =
+        Mod->getOrInsertFunction("__dfsan_control_leave", DFSanControlLeaveFnTy);
+  {
+    AttributeList AL;
+    /*AL = AL.addAttribute(M.getContext(), AttributeList::FunctionIndex,
+                         Attribute::NoUnwind);
+    AL = AL.addAttribute(M.getContext(), AttributeList::FunctionIndex,
+                         Attribute::ReadNone);*/
+    AL = AL.addAttribute(M.getContext(), AttributeList::ReturnIndex,
+                         Attribute::ZExt);
+    DFSanControlScopeLabelFn =
+        Mod->getOrInsertFunction("__dfsan_control_scope_label", DFSanControlScopeLabelFnTy);
+  }
+  DFSanGetLabelFn =
+        Mod->getOrInsertFunction("dfsan_get_label", DFSanGetLabelFnTy);
+// End Region: Implementation Control-flow Analysis
 
   std::vector<Function *> FnsToInstrument;
   SmallPtrSet<Function *, 2> FnsWithNativeABI;
@@ -793,7 +860,14 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         &i != DFSanUnimplementedFn.getCallee()->stripPointerCasts() &&
         &i != DFSanSetLabelFn.getCallee()->stripPointerCasts() &&
         &i != DFSanNonzeroLabelFn.getCallee()->stripPointerCasts() &&
-        &i != DFSanVarargWrapperFn.getCallee()->stripPointerCasts())
+        &i != DFSanVarargWrapperFn.getCallee()->stripPointerCasts() &&
+// Start Region: Implementation Control-flow Analysis
+        &i != DFSanControlEnterFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanControlLeaveFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanControlScopeLabelFn.getCallee()->stripPointerCasts()
+// End Region: Implementation Control-flow Analysis
+        )
+
       FnsToInstrument.push_back(&i);
   }
 
@@ -948,8 +1022,46 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         // DFSanVisitor may delete Inst, so keep track of whether it was a
         // terminator.
         bool IsTerminator = Inst->isTerminator();
-        if (!DFSF.SkipInsts.count(Inst))
+        if (!DFSF.SkipInsts.count(Inst)) {
           DFSanVisitor(DFSF).visit(Inst);
+// Start Region: Implementation Control-flow Analysis
+          if(Inst->getOpcode() == 2) {
+            BranchInst *BI = cast<BranchInst>(Inst);
+            if(BI->getNumOperands() == 3) {
+              Value *Condition = BI->getCondition();
+              IRBuilder<> IRB(BI);
+              IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { DFSF.getShadow(Condition) });
+              DFSF.ScopeInstructions.push(std::make_tuple(Inst,i));
+            }
+          }
+          if(!DFSF.ScopeInstructions.empty()) {
+            auto top = DFSF.ScopeInstructions.top();
+            BranchInst *BI = cast<BranchInst>(std::get<0>(top));
+            if(std::get<1>(top) != i && DFSF.PDT.dominates(Inst,BI)) {
+              DFSF.ScopeInstructions.pop();
+              IRBuilder<> IRB(Inst);
+              IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
+              /*std::string BIstr;
+              std::string Inststr;
+              raw_string_ostream BIstrH(BIstr);
+              raw_string_ostream InststrH(Inststr);
+              BI->print(BIstrH);
+              Inst->print(InststrH);
+              std::cout << Inststr << " post dominates " << BIstr << std::endl;*/
+            }
+            else if(Inst->getOpcode() == 33) {
+            StoreInst *SI = cast<StoreInst>(Inst);
+            auto &DL = SI->getModule()->getDataLayout();
+            IRBuilder<> IRB(SI);
+            Value *ScopeLabel = IRB.CreateCall(DFSF.DFS.DFSanControlScopeLabelFn, {});
+            Value *ValShadow = IRB.CreateCall(DFSF.DFS.DFSanUnionFn, { ScopeLabel,DFSF.getShadow(SI->getValueOperand()) });
+            IRB.CreateCall(DFSF.DFS.DFSanSetLabelFn,
+                 {ValShadow, IRB.CreateBitCast(SI->getPointerOperand(), Type::getInt8PtrTy(*DFSF.DFS.Ctx)),
+                  IRB.CreateZExtOrTrunc(ConstantInt::get(DFSF.DFS.IntptrTy,DL.getTypeAllocSize(SI->getValueOperand()->getType())), DFSF.DFS.IntptrTy)});
+            }
+          }
+// End Region: Implementation Control-flow Analysis
+          }
         if (IsTerminator)
           break;
         Inst = Next;
@@ -1263,6 +1375,19 @@ Value *DFSanFunction::loadShadow(Value *Addr, uint64_t Size, uint64_t Align,
         DT.changeImmediateDominator(Child, NewNode);
     }
 
+// Start Region: Implementation Control-flow Analysis
+    if (DomTreeNode *OldNode = PDT.getNode(Head)) {
+      std::vector<DomTreeNode *> Children(OldNode->begin(), OldNode->end());
+
+      DomTreeNode *NewNode = PDT.addNewBlock(Tail, Head);
+      int z = 0;
+      for (auto Child : Children) {
+        PDT.changeImmediateDominator(Child, NewNode);
+        z = z + 1;
+      }
+    }
+// End Region: Implementation Control-flow Analysis
+
     // In the following code LastBr will refer to the previous basic block's
     // conditional branch instruction, whose true successor is fixed up to point
     // to the next block during the loop below or to the tail after the final
@@ -1271,10 +1396,21 @@ Value *DFSanFunction::loadShadow(Value *Addr, uint64_t Size, uint64_t Align,
     ReplaceInstWithInst(Head->getTerminator(), LastBr);
     DT.addNewBlock(FallbackBB, Head);
 
+// Start Region: Implementation Control-flow Analysis
+    std::cout << "PDT Check 5" << std::endl;
+    PDT.addNewBlock(FallbackBB, Head);
+    std::cout << "PDT Check 6" << std::endl;
+// End Region: Implementation Control-flow Analysis
+
     for (uint64_t Ofs = 64 / DFS.ShadowWidth; Ofs != Size;
          Ofs += 64 / DFS.ShadowWidth) {
       BasicBlock *NextBB = BasicBlock::Create(*DFS.Ctx, "", F);
       DT.addNewBlock(NextBB, LastBr->getParent());
+
+// Start Region: Implementation Control-flow Analysis
+      PDT.addNewBlock(NextBB, LastBr->getParent());
+// End Region: Implementation Control-flow Analysis
+
       IRBuilder<> NextIRB(NextBB);
       WideAddr = NextIRB.CreateGEP(Type::getInt64Ty(*DFS.Ctx), WideAddr,
                                    ConstantInt::get(DFS.IntptrTy, 1));

@@ -18,6 +18,7 @@
 // prefixed __dfsan_.
 //===----------------------------------------------------------------------===//
 
+#include <stdio.h>
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_file.h"
@@ -162,6 +163,7 @@ static void dfsan_check_label(dfsan_label label) {
 // this function (the instrumentation pass inlines the equality test).
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
+  printf("Unifying label1 %d with label2 %d\n", l1, l2);
   if (flags().fast16labels)
     return l1 | l2;
   DCHECK_NE(l1, l2);
@@ -259,6 +261,7 @@ dfsan_label dfsan_create_label(const char *desc, void *userdata) {
   __dfsan_label_info[label].l1 = __dfsan_label_info[label].l2 = 0;
   __dfsan_label_info[label].desc = desc;
   __dfsan_label_info[label].userdata = userdata;
+  /*printf("Created label %d\n", label);*/
   return label;
 }
 
@@ -458,3 +461,66 @@ static void dfsan_init(int argc, char **argv, char **envp) {
 __attribute__((section(".preinit_array"), used))
 static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 #endif
+
+
+// Start Region: Implementation Control-flow Analysis
+
+// Explicit control flow taint analysis is implemented here.
+// We taint any operand inside the scope of the control structure with
+// the taint incorporated by the condition to enter the control structure.
+
+// Initial size of the data structure for control labels.
+static const int __dfsan_control_array_starting_size = 16;
+// Data Structure to save the current status of the control structure label.
+dfsan_label __dfsan_control_array[__dfsan_control_array_starting_size];
+// Starting depth for control structures.
+static int __dfsan_control_depth = 0;
+
+// Called when entering a control structure such as for, if, while, etc.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
+__dfsan_control_enter (dfsan_label label) {
+  if(__dfsan_control_depth < 1){
+    __dfsan_control_array[__dfsan_control_depth] = label;
+  }
+  else {
+    __dfsan_control_array[__dfsan_control_depth] = dfsan_union(__dfsan_control_array[__dfsan_control_depth-1],label);
+  }
+  __dfsan_control_depth++;
+  printf("Label %d has been added to the control data structure.\n", label);
+  return;
+}
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
+dfsan_control_enter (dfsan_label label) {
+  return __dfsan_control_enter(label);
+}
+
+// Called when we leave a control structure.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
+__dfsan_control_leave (void) {
+  __dfsan_control_depth--;
+  return ;
+}
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
+dfsan_control_leave (void) {
+  return __dfsan_control_leave();
+}
+
+// Called when we need the label of the current control structure.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
+__dfsan_control_scope_label (void) {
+  printf("%d %d\n", __dfsan_control_depth, __dfsan_control_array[__dfsan_control_depth-1]);
+  if(__dfsan_control_depth < 1){
+    return 0;
+  }
+  return __dfsan_control_array[__dfsan_control_depth-1];
+}
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
+dfsan_control_scope_label (void) {
+  return __dfsan_control_scope_label();
+}
+
+// clang++ -O2 -mllvm -disable-llvm-optzns file.cpp -S -emit-llvm -c
+// opt -mem2reg -dfsan file.ll
+// llc -relocation-model=pic -filetype=obj file.ll
+// cmake -DLLVM_ENABLE_PROJECTS="clang;compiler-rt;libcxx;libcxxabi" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$(pwd)/../install ../llvm
+// End Region: Implementation Control-flow Analysis
