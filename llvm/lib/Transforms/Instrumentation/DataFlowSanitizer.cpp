@@ -485,6 +485,9 @@ public:
   void visitSelectInst(SelectInst &I);
   void visitMemSetInst(MemSetInst &I);
   void visitMemTransferInst(MemTransferInst &I);
+// Start Region: Implementation Control-flow Analysis
+  void visitBranchInst(BranchInst &I);
+// End Region: Implementation Control-flow Analysis
 };
 
 } // end anonymous namespace
@@ -1023,21 +1026,13 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         // terminator.
         bool IsTerminator = Inst->isTerminator();
         if (!DFSF.SkipInsts.count(Inst)) {
-          DFSanVisitor(DFSF).visit(Inst);
 // Start Region: Implementation Control-flow Analysis
-          if(Inst->getOpcode() == 2) {
-            BranchInst *BI = cast<BranchInst>(Inst);
-            if(BI->getNumOperands() == 3) {
-              Value *Condition = BI->getCondition();
-              IRBuilder<> IRB(BI);
-              IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { DFSF.getShadow(Condition) });
-              DFSF.ScopeInstructions.push(std::make_tuple(Inst,i));
-            }
-          }
           if(!DFSF.ScopeInstructions.empty()) {
+            std::cout << "Start Post Dominance Analysis" << std::endl;
             auto top = DFSF.ScopeInstructions.top();
             BranchInst *BI = cast<BranchInst>(std::get<0>(top));
-            if(std::get<1>(top) != i && DFSF.PDT.dominates(Inst,BI)) {
+            DFSF.PDT.recalculate(*DFSF.F);
+            if(std::get<1>(top) != Inst->getParent() && DFSF.PDT.dominates(Inst,BI)) {
               DFSF.ScopeInstructions.pop();
               IRBuilder<> IRB(Inst);
               IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
@@ -1049,18 +1044,10 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
               Inst->print(InststrH);
               std::cout << Inststr << " post dominates " << BIstr << std::endl;*/
             }
-            else if(Inst->getOpcode() == 33) {
-            StoreInst *SI = cast<StoreInst>(Inst);
-            auto &DL = SI->getModule()->getDataLayout();
-            IRBuilder<> IRB(SI);
-            Value *ScopeLabel = IRB.CreateCall(DFSF.DFS.DFSanControlScopeLabelFn, {});
-            Value *ValShadow = IRB.CreateCall(DFSF.DFS.DFSanUnionFn, { ScopeLabel,DFSF.getShadow(SI->getValueOperand()) });
-            IRB.CreateCall(DFSF.DFS.DFSanSetLabelFn,
-                 {ValShadow, IRB.CreateBitCast(SI->getPointerOperand(), Type::getInt8PtrTy(*DFSF.DFS.Ctx)),
-                  IRB.CreateZExtOrTrunc(ConstantInt::get(DFSF.DFS.IntptrTy,DL.getTypeAllocSize(SI->getValueOperand()->getType())), DFSF.DFS.IntptrTy)});
-            }
+            std::cout << "End Post Dominance Analysis" << std::endl;
           }
 // End Region: Implementation Control-flow Analysis
+          DFSanVisitor(DFSF).visit(Inst);
           }
         if (IsTerminator)
           break;
@@ -1375,19 +1362,6 @@ Value *DFSanFunction::loadShadow(Value *Addr, uint64_t Size, uint64_t Align,
         DT.changeImmediateDominator(Child, NewNode);
     }
 
-// Start Region: Implementation Control-flow Analysis
-    if (DomTreeNode *OldNode = PDT.getNode(Head)) {
-      std::vector<DomTreeNode *> Children(OldNode->begin(), OldNode->end());
-
-      DomTreeNode *NewNode = PDT.addNewBlock(Tail, Head);
-      int z = 0;
-      for (auto Child : Children) {
-        PDT.changeImmediateDominator(Child, NewNode);
-        z = z + 1;
-      }
-    }
-// End Region: Implementation Control-flow Analysis
-
     // In the following code LastBr will refer to the previous basic block's
     // conditional branch instruction, whose true successor is fixed up to point
     // to the next block during the loop below or to the tail after the final
@@ -1396,20 +1370,10 @@ Value *DFSanFunction::loadShadow(Value *Addr, uint64_t Size, uint64_t Align,
     ReplaceInstWithInst(Head->getTerminator(), LastBr);
     DT.addNewBlock(FallbackBB, Head);
 
-// Start Region: Implementation Control-flow Analysis
-    std::cout << "PDT Check 5" << std::endl;
-    PDT.addNewBlock(FallbackBB, Head);
-    std::cout << "PDT Check 6" << std::endl;
-// End Region: Implementation Control-flow Analysis
-
     for (uint64_t Ofs = 64 / DFS.ShadowWidth; Ofs != Size;
          Ofs += 64 / DFS.ShadowWidth) {
       BasicBlock *NextBB = BasicBlock::Create(*DFS.Ctx, "", F);
       DT.addNewBlock(NextBB, LastBr->getParent());
-
-// Start Region: Implementation Control-flow Analysis
-      PDT.addNewBlock(NextBB, LastBr->getParent());
-// End Region: Implementation Control-flow Analysis
 
       IRBuilder<> NextIRB(NextBB);
       WideAddr = NextIRB.CreateGEP(Type::getInt64Ty(*DFS.Ctx), WideAddr,
@@ -1536,6 +1500,17 @@ void DFSanVisitor::visitStoreInst(StoreInst &SI) {
     Value *PtrShadow = DFSF.getShadow(SI.getPointerOperand());
     Shadow = DFSF.combineShadows(Shadow, PtrShadow, &SI);
   }
+
+// Start Region: Implementation Control-flow Analysis
+  if(!DFSF.ScopeInstructions.empty()) {
+    std::cout << "Start Store Analysis" << std::endl;
+    IRBuilder<> IRB(&SI);
+    Value *ScopeLabel = IRB.CreateCall(DFSF.DFS.DFSanControlScopeLabelFn, {});
+    Shadow = DFSF.combineShadows(ScopeLabel,Shadow,&SI);
+    std::cout << "End Store Analysis" << std::endl;
+  }
+// End Region: Implementation Control-flow Analysis
+
   DFSF.storeShadow(SI.getPointerOperand(), Size, Align, Shadow, &SI);
 }
 
@@ -1916,3 +1891,21 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
   DFSF.PHIFixups.push_back(std::make_pair(&PN, ShadowPN));
   DFSF.setShadow(&PN, ShadowPN);
 }
+
+// Start Region: Implementation Control-flow Analysis
+void DFSanVisitor::visitBranchInst(BranchInst &BI) {
+  if(BI.getNumOperands() == 3) {
+    std::cout << "Start Branch Analysis" << std::endl;
+    auto &DL = BI.getModule()->getDataLayout();
+    Value *Cond = BI.getCondition();
+    Value *Addr = DFSF.DFS.getShadowAddress(Cond,&BI);
+    uint64_t Align = DL.getABITypeAlignment(Cond->getType());
+    uint64_t Size = DL.getTypeStoreSize(Cond->getType());
+    Value *CondShadow = DFSF.getShadow(Cond);
+    IRBuilder<> IRB(&BI);
+    IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
+    DFSF.ScopeInstructions.push(std::make_tuple(&BI,BI.getParent()));
+    std::cout << "End Branch Analysis" << std::endl;
+  }
+}
+// End Region: Implementation Control-flow Analysis
