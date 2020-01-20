@@ -106,8 +106,6 @@
 // Start Region: Implementation Control-flow Analysis
 #include <iostream>
 #include "llvm/Analysis/PostDominators.h"
-#include <stack>
-#include <tuple>
 #include <unordered_set>
 // End Region: Implementation Control-flow Analysis
 
@@ -364,11 +362,9 @@ class DataFlowSanitizer : public ModulePass {
   FunctionType *DFSanControlEnterFnTy;
   FunctionType *DFSanControlLeaveFnTy;
   FunctionType *DFSanControlScopeLabelFnTy;
-  FunctionType *DFSanGetLabelFnTy;
   FunctionCallee DFSanControlEnterFn;
   FunctionCallee DFSanControlLeaveFn;
   FunctionCallee DFSanControlScopeLabelFn;
-  FunctionCallee DFSanGetLabelFn;
 // End Region: Implementation Control-flow Analysis
   MDNode *ColdCallWeights;
   DFSanABIList ABIList;
@@ -418,8 +414,7 @@ struct DFSanFunction {
   bool AvoidNewBlocks;
 // Start Region: Implementation Control-flow Analysis
   PostDominatorTree PDT;
-  //std::stack<std::tuple<Instruction *,BasicBlock *>> ScopeInstructions;
-  std::unordered_set<BasicBlock *> ScopeBasicBlocks;
+  std::unordered_set<BasicBlock *> ImmPostDomBlocks;
 // End Region: Implementation Control-flow Analysis
 
 
@@ -617,15 +612,12 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
       Type::getVoidTy(*Ctx), Type::getInt8PtrTy(*Ctx), /*isVarArg=*/false);
 // Start Region: Implementation Control-flow Analysis
   Type *DFSanControlEnterArgs[1] { ShadowTy };
-  Type *DFSanGetLabelArgs[1] = { IntptrTy };
   DFSanControlEnterFnTy =
       FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlEnterArgs, /*isVarArg=*/false);
   DFSanControlLeaveFnTy =
       FunctionType::get(Type::getVoidTy(*Ctx), None, /*isVarArg=*/false);
   DFSanControlScopeLabelFnTy =
       FunctionType::get(ShadowTy, None, /*isVarArg=*/false);
-  DFSanGetLabelFnTy =
-      FunctionType::get(ShadowTy, DFSanGetLabelArgs, /*isVarArg=*/false);
 // End Region: Implementation Control-flow Analysis
 
   if (GetArgTLSPtr) {
@@ -833,26 +825,15 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     DFSanControlEnterFn =
         Mod->getOrInsertFunction("__dfsan_control_enter", DFSanControlEnterFnTy, AL);
   }
-    /*AttributeList AL;
-    AL = AL.addAttribute(M.getContext(), AttributeList::FunctionIndex,
-                         Attribute::NoUnwind);
-    AL = AL.addAttribute(M.getContext(), AttributeList::FunctionIndex,
-                         Attribute::ReadNone);*/
     DFSanControlLeaveFn =
         Mod->getOrInsertFunction("__dfsan_control_leave", DFSanControlLeaveFnTy);
   {
     AttributeList AL;
-    /*AL = AL.addAttribute(M.getContext(), AttributeList::FunctionIndex,
-                         Attribute::NoUnwind);
-    AL = AL.addAttribute(M.getContext(), AttributeList::FunctionIndex,
-                         Attribute::ReadNone);*/
     AL = AL.addAttribute(M.getContext(), AttributeList::ReturnIndex,
                          Attribute::ZExt);
     DFSanControlScopeLabelFn =
         Mod->getOrInsertFunction("__dfsan_control_scope_label", DFSanControlScopeLabelFnTy);
   }
-  DFSanGetLabelFn =
-        Mod->getOrInsertFunction("dfsan_get_label", DFSanGetLabelFnTy);
 // End Region: Implementation Control-flow Analysis
 
   std::vector<Function *> FnsToInstrument;
@@ -1019,37 +1000,11 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
 
     for (BasicBlock *i : BBList) {
       Instruction *Inst = &i->front();
-      //bool test = true;
-      //BasicBlock *block = Inst->getParent();
 // Start Region: Implementation Control-flow Analysis
-    //test = test && block == Inst->getParent();
-    //if(!DFSF.ScopeInstructions.empty()) {
-      //std::cout << "Start Post Dominance Analysis" << std::endl;
-      //auto top = DFSF.ScopeInstructions.top();
-      //BranchInst *BI = cast<BranchInst>(std::get<0>(top));
-      //BasicBlock *BB = std::get<1>(top);
-      //DFSF.PDT.recalculate(*DFSF.F);
-
-      //std::cout << "getParent dominates BB? " << (DFSF.PDT.dominates(Inst->getParent(),BB)) << std::endl;
-      //std::cout << "i dominates BB? " << (DFSF.PDT.dominates(i,BB)) << std::endl;
-      //std::cout << "Inst dominates BI? " << (DFSF.PDT.dominates(Inst,BI)) << std::endl;
-      if(DFSF.ScopeBasicBlocks.count(Inst->getParent())) {
-        //std::cout << "BasicBlock is an immediate post dominator." << std::endl;
-      //}
-      //if(BB != Inst->getParent() && DFSF.PDT.dominates(i,BB)) {
-        //DFSF.ScopeInstructions.pop();
+      if(DFSF.ImmPostDomBlocks.count(Inst->getParent())) {
         IRBuilder<> IRB(Inst);
         IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
-        /*std::string BIstr;
-        std::string Inststr;
-        raw_string_ostream BIstrH(BIstr);
-        raw_string_ostream InststrH(Inststr);
-        BI->print(BIstrH);
-        Inst->print(InststrH);
-        std::cout << Inststr << " post dominates " << BIstr << std::endl;*/
       }
-      //std::cout << "End Post Dominance Analysis" << std::endl;
-    //}
 // End Region: Implementation Control-flow Analysis
       while (true) {
         // DFSanVisitor may split the current basic block, changing the current
@@ -1516,13 +1471,9 @@ void DFSanVisitor::visitStoreInst(StoreInst &SI) {
   }
 
 // Start Region: Implementation Control-flow Analysis
-  //if(DFSF.ScopeBasicBlocks.count(SI.getParent())) {
-    //std::cout << "Start Store Analysis" << std::endl;
     IRBuilder<> IRB(&SI);
     Value *ScopeLabel = IRB.CreateCall(DFSF.DFS.DFSanControlScopeLabelFn, {});
     Shadow = DFSF.combineShadows(ScopeLabel,Shadow,&SI);
-    //std::cout << "End Store Analysis" << std::endl;
-  //}
 // End Region: Implementation Control-flow Analysis
 
   DFSF.storeShadow(SI.getPointerOperand(), Size, Align, Shadow, &SI);
@@ -1910,21 +1861,11 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
 void DFSanVisitor::visitBranchInst(BranchInst &BI) {
   if(BI.isConditional()) {
     DFSF.PDT.recalculate(*DFSF.F);
-    //std::cout << "Start Branch Analysis" << std::endl;
-    //if(DFSF.PDT.getNode(BI.getParent())) {
-      //std::cout << "Branch parent exists" << std::endl;
-      //if(DFSF.PDT.getNode(BI.getParent())->getIDom()) {
-        //std::cout << "The IDom of this branch instruction is " << DFSF.PDT.getNode(BI.getParent())->getIDom() << std::endl;
-      //}
-    //}
     Value *Cond = BI.getCondition();
     Value *CondShadow = DFSF.getShadow(Cond);
     IRBuilder<> IRB(&BI);
     IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
-    //DFSF.ScopeInstructions.push(std::make_tuple(&BI,BI.getParent()));
-    DFSF.ScopeBasicBlocks.insert(DFSF.PDT.getNode(BI.getParent())->getIDom()->getBlock());
-    //std::cout << "unordered_set size " << DFSF.ScopeBasicBlocks.size() << std::endl;
-    //std::cout << "End Branch Analysis" << std::endl;
+    DFSF.ImmPostDomBlocks.insert(DFSF.PDT.getNode(BI.getParent())->getIDom()->getBlock());
   }
 }
 // End Region: Implementation Control-flow Analysis
