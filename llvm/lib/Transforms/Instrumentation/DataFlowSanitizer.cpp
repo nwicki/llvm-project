@@ -108,6 +108,7 @@
 #include "llvm/Analysis/PostDominators.h"
 #include <stack>
 #include <tuple>
+#include <unordered_set>
 // End Region: Implementation Control-flow Analysis
 
 using namespace llvm;
@@ -417,7 +418,8 @@ struct DFSanFunction {
   bool AvoidNewBlocks;
 // Start Region: Implementation Control-flow Analysis
   PostDominatorTree PDT;
-  std::stack<std::tuple<Instruction *,BasicBlock *>> ScopeInstructions;
+  //std::stack<std::tuple<Instruction *,BasicBlock *>> ScopeInstructions;
+  std::unordered_set<BasicBlock *> ScopeBasicBlocks;
 // End Region: Implementation Control-flow Analysis
 
 
@@ -1017,6 +1019,38 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
 
     for (BasicBlock *i : BBList) {
       Instruction *Inst = &i->front();
+      //bool test = true;
+      //BasicBlock *block = Inst->getParent();
+// Start Region: Implementation Control-flow Analysis
+    //test = test && block == Inst->getParent();
+    //if(!DFSF.ScopeInstructions.empty()) {
+      //std::cout << "Start Post Dominance Analysis" << std::endl;
+      //auto top = DFSF.ScopeInstructions.top();
+      //BranchInst *BI = cast<BranchInst>(std::get<0>(top));
+      //BasicBlock *BB = std::get<1>(top);
+      //DFSF.PDT.recalculate(*DFSF.F);
+
+      //std::cout << "getParent dominates BB? " << (DFSF.PDT.dominates(Inst->getParent(),BB)) << std::endl;
+      //std::cout << "i dominates BB? " << (DFSF.PDT.dominates(i,BB)) << std::endl;
+      //std::cout << "Inst dominates BI? " << (DFSF.PDT.dominates(Inst,BI)) << std::endl;
+      if(DFSF.ScopeBasicBlocks.count(Inst->getParent())) {
+        //std::cout << "BasicBlock is an immediate post dominator." << std::endl;
+      //}
+      //if(BB != Inst->getParent() && DFSF.PDT.dominates(i,BB)) {
+        //DFSF.ScopeInstructions.pop();
+        IRBuilder<> IRB(Inst);
+        IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
+        /*std::string BIstr;
+        std::string Inststr;
+        raw_string_ostream BIstrH(BIstr);
+        raw_string_ostream InststrH(Inststr);
+        BI->print(BIstrH);
+        Inst->print(InststrH);
+        std::cout << Inststr << " post dominates " << BIstr << std::endl;*/
+      }
+      //std::cout << "End Post Dominance Analysis" << std::endl;
+    //}
+// End Region: Implementation Control-flow Analysis
       while (true) {
         // DFSanVisitor may split the current basic block, changing the current
         // instruction's next pointer and moving the next instruction to the
@@ -1026,33 +1060,13 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         // terminator.
         bool IsTerminator = Inst->isTerminator();
         if (!DFSF.SkipInsts.count(Inst)) {
-// Start Region: Implementation Control-flow Analysis
-          if(!DFSF.ScopeInstructions.empty()) {
-            std::cout << "Start Post Dominance Analysis" << std::endl;
-            auto top = DFSF.ScopeInstructions.top();
-            BranchInst *BI = cast<BranchInst>(std::get<0>(top));
-            DFSF.PDT.recalculate(*DFSF.F);
-            if(std::get<1>(top) != Inst->getParent() && DFSF.PDT.dominates(Inst,BI)) {
-              DFSF.ScopeInstructions.pop();
-              IRBuilder<> IRB(Inst);
-              IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
-              /*std::string BIstr;
-              std::string Inststr;
-              raw_string_ostream BIstrH(BIstr);
-              raw_string_ostream InststrH(Inststr);
-              BI->print(BIstrH);
-              Inst->print(InststrH);
-              std::cout << Inststr << " post dominates " << BIstr << std::endl;*/
-            }
-            std::cout << "End Post Dominance Analysis" << std::endl;
-          }
-// End Region: Implementation Control-flow Analysis
           DFSanVisitor(DFSF).visit(Inst);
           }
         if (IsTerminator)
           break;
         Inst = Next;
       }
+      //std::cout << "Do all instructions in a block have the same parent? " << test << std::endl;
     }
 
     // We will not necessarily be able to compute the shadow for every phi node
@@ -1502,13 +1516,13 @@ void DFSanVisitor::visitStoreInst(StoreInst &SI) {
   }
 
 // Start Region: Implementation Control-flow Analysis
-  if(!DFSF.ScopeInstructions.empty()) {
-    std::cout << "Start Store Analysis" << std::endl;
+  //if(DFSF.ScopeBasicBlocks.count(SI.getParent())) {
+    //std::cout << "Start Store Analysis" << std::endl;
     IRBuilder<> IRB(&SI);
     Value *ScopeLabel = IRB.CreateCall(DFSF.DFS.DFSanControlScopeLabelFn, {});
     Shadow = DFSF.combineShadows(ScopeLabel,Shadow,&SI);
-    std::cout << "End Store Analysis" << std::endl;
-  }
+    //std::cout << "End Store Analysis" << std::endl;
+  //}
 // End Region: Implementation Control-flow Analysis
 
   DFSF.storeShadow(SI.getPointerOperand(), Size, Align, Shadow, &SI);
@@ -1894,18 +1908,23 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
 
 // Start Region: Implementation Control-flow Analysis
 void DFSanVisitor::visitBranchInst(BranchInst &BI) {
-  if(BI.getNumOperands() == 3) {
-    std::cout << "Start Branch Analysis" << std::endl;
-    auto &DL = BI.getModule()->getDataLayout();
+  if(BI.isConditional()) {
+    DFSF.PDT.recalculate(*DFSF.F);
+    //std::cout << "Start Branch Analysis" << std::endl;
+    //if(DFSF.PDT.getNode(BI.getParent())) {
+      //std::cout << "Branch parent exists" << std::endl;
+      //if(DFSF.PDT.getNode(BI.getParent())->getIDom()) {
+        //std::cout << "The IDom of this branch instruction is " << DFSF.PDT.getNode(BI.getParent())->getIDom() << std::endl;
+      //}
+    //}
     Value *Cond = BI.getCondition();
-    Value *Addr = DFSF.DFS.getShadowAddress(Cond,&BI);
-    uint64_t Align = DL.getABITypeAlignment(Cond->getType());
-    uint64_t Size = DL.getTypeStoreSize(Cond->getType());
     Value *CondShadow = DFSF.getShadow(Cond);
     IRBuilder<> IRB(&BI);
     IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
-    DFSF.ScopeInstructions.push(std::make_tuple(&BI,BI.getParent()));
-    std::cout << "End Branch Analysis" << std::endl;
+    //DFSF.ScopeInstructions.push(std::make_tuple(&BI,BI.getParent()));
+    DFSF.ScopeBasicBlocks.insert(DFSF.PDT.getNode(BI.getParent())->getIDom()->getBlock());
+    //std::cout << "unordered_set size " << DFSF.ScopeBasicBlocks.size() << std::endl;
+    //std::cout << "End Branch Analysis" << std::endl;
   }
 }
 // End Region: Implementation Control-flow Analysis

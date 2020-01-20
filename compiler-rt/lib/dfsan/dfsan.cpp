@@ -163,7 +163,6 @@ static void dfsan_check_label(dfsan_label label) {
 // this function (the instrumentation pass inlines the equality test).
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
-  printf("Unifying label1 %d with label2 %d\n", l1, l2);
   if (flags().fast16labels)
     return l1 | l2;
   DCHECK_NE(l1, l2);
@@ -206,6 +205,7 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
       label = atomic_load(table_ent, memory_order_acquire);
     } while (label == kInitializingLabel);
   }
+  printf("Unifying label1 %d with label2 %d to %d\n", l1, l2, label);
   return label;
 }
 
@@ -485,8 +485,10 @@ __dfsan_control_enter (dfsan_label label) {
   else {
     __dfsan_control_array[__dfsan_control_depth] = dfsan_union(__dfsan_control_array[__dfsan_control_depth-1],label);
   }
+  printf("Previous scope label: %d.\n", __dfsan_control_array[__dfsan_control_depth-1]);
+  printf("Scope label addition: %d.\n", label);
+  printf("Current scope label: %d.\n", __dfsan_control_array[__dfsan_control_depth]);
   __dfsan_control_depth++;
-  printf("Label %d has been added to the control data structure.\n", label);
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -497,6 +499,7 @@ dfsan_control_enter (dfsan_label label) {
 // Called when we leave a control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_leave (void) {
+  printf("Left scope.\n\n");
   __dfsan_control_depth--;
   return ;
 }
@@ -508,7 +511,7 @@ dfsan_control_leave (void) {
 // Called when we need the label of the current control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 __dfsan_control_scope_label (void) {
-  printf("%d %d\n", __dfsan_control_depth, __dfsan_control_array[__dfsan_control_depth-1]);
+  //printf("%d %d\n", __dfsan_control_depth, __dfsan_control_array[__dfsan_control_depth-1]);
   if(__dfsan_control_depth < 1){
     return 0;
   }
