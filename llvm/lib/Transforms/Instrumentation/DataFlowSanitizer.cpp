@@ -104,9 +104,12 @@
 #include <vector>
 
 // Start Region: Implementation Control-flow Analysis
-#include <iostream>
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Function.h"
 #include <unordered_set>
+#include <iostream>
 // End Region: Implementation Control-flow Analysis
 
 using namespace llvm;
@@ -415,6 +418,7 @@ struct DFSanFunction {
 // Start Region: Implementation Control-flow Analysis
   PostDominatorTree PDT;
   std::unordered_set<BasicBlock *> ImmPostDomBlocks;
+  LoopInfo *LI = nullptr;
 // End Region: Implementation Control-flow Analysis
 
 
@@ -994,10 +998,31 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
 
     DFSanFunction DFSF(*this, i, FnsWithNativeABI.count(i));
 
+// Start Region: Implementation Control-flow Analysis
+//  DFSF.LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
+// End Region: Implementation Control-flow Analysis
+
     // DFSanVisitor may create new basic blocks, which confuses df_iterator.
     // Build a copy of the list before iterating over it.
     SmallVector<BasicBlock *, 4> BBList(depth_first(&i->getEntryBlock()));
-
+// Start Region: Implementation Control-flow Analysis
+    for (BasicBlock *i : BBList) {
+      Instruction *Inst = &i->front();
+      while (true) {
+        if(isa<BranchInst>(Inst))
+        {
+          BranchInst *BI = cast<BranchInst>(Inst);
+          if(BI->isConditional()) {
+            DFSF.ImmPostDomBlocks.insert(DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock());
+          }
+        }
+        Instruction *Next = Inst->getNextNode();
+        if (Inst->isTerminator())
+          break;
+        Inst = Next;
+      }
+    }
+// End Region: Implementation Control-flow Analysis
     for (BasicBlock *i : BBList) {
       Instruction *Inst = &i->front();
 // Start Region: Implementation Control-flow Analysis
@@ -1860,12 +1885,24 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
 // Start Region: Implementation Control-flow Analysis
 void DFSanVisitor::visitBranchInst(BranchInst &BI) {
   if(BI.isConditional()) {
-    DFSF.PDT.recalculate(*DFSF.F);
     Value *Cond = BI.getCondition();
     Value *CondShadow = DFSF.getShadow(Cond);
-    IRBuilder<> IRB(&BI);
-    IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
-    DFSF.ImmPostDomBlocks.insert(DFSF.PDT.getNode(BI.getParent())->getIDom()->getBlock());
+    Loop* loop = nullptr;
+    if(DFSF.LI) {
+      loop = DFSF.LI->getLoopFor(BI.getParent());
+    }
+    else {
+      std::cout << "LoopInfo was null" << std::endl;
+    }
+    if(loop) {
+      Instruction *last = loop->getLoopPreheader()->getTerminator();
+      IRBuilder<> IRB(last);
+      IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
+    }
+    else {
+      IRBuilder<> IRB(&BI);
+      IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
+    }
   }
 }
 // End Region: Implementation Control-flow Analysis

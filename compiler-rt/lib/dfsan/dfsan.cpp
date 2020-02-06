@@ -205,7 +205,6 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
       label = atomic_load(table_ent, memory_order_acquire);
     } while (label == kInitializingLabel);
   }
-  printf("Unifying label1 %d with label2 %d to %d\n", l1, l2, label);
   return label;
 }
 
@@ -261,7 +260,6 @@ dfsan_label dfsan_create_label(const char *desc, void *userdata) {
   __dfsan_label_info[label].l1 = __dfsan_label_info[label].l2 = 0;
   __dfsan_label_info[label].desc = desc;
   __dfsan_label_info[label].userdata = userdata;
-  /*printf("Created label %d\n", label);*/
   return label;
 }
 
@@ -485,9 +483,6 @@ __dfsan_control_enter (dfsan_label label) {
   else {
     __dfsan_control_array[__dfsan_control_depth] = dfsan_union(__dfsan_control_array[__dfsan_control_depth-1],label);
   }
-  printf("Previous scope label: %d.\n", __dfsan_control_array[__dfsan_control_depth-1]);
-  printf("Scope label addition: %d.\n", label);
-  printf("Current scope label: %d.\n", __dfsan_control_array[__dfsan_control_depth]);
   __dfsan_control_depth++;
   return;
 }
@@ -499,7 +494,6 @@ dfsan_control_enter (dfsan_label label) {
 // Called when we leave a control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_leave (void) {
-  printf("Left scope.\n\n");
   __dfsan_control_depth--;
   return ;
 }
@@ -511,7 +505,7 @@ dfsan_control_leave (void) {
 // Called when we need the label of the current control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 __dfsan_control_scope_label (void) {
-  //printf("%d %d\n", __dfsan_control_depth, __dfsan_control_array[__dfsan_control_depth-1]);
+  printf("__dfsan_control_depth %d\n", __dfsan_control_depth);
   if(__dfsan_control_depth < 1){
     return 0;
   }
