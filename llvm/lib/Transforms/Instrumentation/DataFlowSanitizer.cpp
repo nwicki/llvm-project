@@ -110,6 +110,7 @@
 #include "llvm/IR/Function.h"
 #include <unordered_set>
 #include <iostream>
+#include "llvm/Support/raw_ostream.h"
 // End Region: Implementation Control-flow Analysis
 
 using namespace llvm;
@@ -363,9 +364,11 @@ class DataFlowSanitizer : public ModulePass {
   FunctionCallee DFSanVarargWrapperFn;
 // Start Region: Implementation Control-flow Analysis
   FunctionType *DFSanControlEnterFnTy;
+  FunctionType *DFSanControlReplaceFnTy;
   FunctionType *DFSanControlLeaveFnTy;
   FunctionType *DFSanControlScopeLabelFnTy;
   FunctionCallee DFSanControlEnterFn;
+  FunctionCallee DFSanControlReplaceFn;
   FunctionCallee DFSanControlLeaveFn;
   FunctionCallee DFSanControlScopeLabelFn;
 // End Region: Implementation Control-flow Analysis
@@ -398,6 +401,10 @@ public:
 
   bool doInitialization(Module &M) override;
   bool runOnModule(Module &M) override;
+// Start Region: Implementation Control-flow Analysis
+  void getAnalysisUsage(AnalysisUsage &AU) const;
+// End Region: Implementation Control-flow Analysis
+
 };
 
 struct DFSanFunction {
@@ -418,6 +425,7 @@ struct DFSanFunction {
 // Start Region: Implementation Control-flow Analysis
   PostDominatorTree PDT;
   std::unordered_set<BasicBlock *> ImmPostDomBlocks;
+  std::unordered_set<Instruction *> CondBranches;
   LoopInfo *LI = nullptr;
 // End Region: Implementation Control-flow Analysis
 
@@ -618,6 +626,9 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
   Type *DFSanControlEnterArgs[1] { ShadowTy };
   DFSanControlEnterFnTy =
       FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlEnterArgs, /*isVarArg=*/false);
+  Type *DFSanControlReplaceArgs[1] { ShadowTy };
+  DFSanControlReplaceFnTy =
+      FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlReplaceArgs, /*isVarArg=*/false);
   DFSanControlLeaveFnTy =
       FunctionType::get(Type::getVoidTy(*Ctx), None, /*isVarArg=*/false);
   DFSanControlScopeLabelFnTy =
@@ -752,6 +763,12 @@ Constant *DataFlowSanitizer::getOrBuildTrampolineFunction(FunctionType *FT,
 
   return cast<Constant>(C.getCallee());
 }
+// Start Region: Implementation Control-flow Analysis
+void DataFlowSanitizer::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesCFG();
+  AU.addRequired<LoopInfoWrapperPass>();
+}
+// End Region: Implementation Control-flow Analysis
 
 bool DataFlowSanitizer::runOnModule(Module &M) {
   if (ABIList.isIn(M, "skip"))
@@ -829,6 +846,12 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     DFSanControlEnterFn =
         Mod->getOrInsertFunction("__dfsan_control_enter", DFSanControlEnterFnTy, AL);
   }
+  {
+    AttributeList AL;
+    AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
+    DFSanControlReplaceFn =
+        Mod->getOrInsertFunction("__dfsan_control_replace", DFSanControlReplaceFnTy, AL);
+  }
     DFSanControlLeaveFn =
         Mod->getOrInsertFunction("__dfsan_control_leave", DFSanControlLeaveFnTy);
   {
@@ -853,6 +876,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         &i != DFSanVarargWrapperFn.getCallee()->stripPointerCasts() &&
 // Start Region: Implementation Control-flow Analysis
         &i != DFSanControlEnterFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanControlReplaceFn.getCallee()->stripPointerCasts() &&
         &i != DFSanControlLeaveFn.getCallee()->stripPointerCasts() &&
         &i != DFSanControlScopeLabelFn.getCallee()->stripPointerCasts()
 // End Region: Implementation Control-flow Analysis
@@ -999,7 +1023,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     DFSanFunction DFSF(*this, i, FnsWithNativeABI.count(i));
 
 // Start Region: Implementation Control-flow Analysis
-//  DFSF.LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
+    DFSF.LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
 // End Region: Implementation Control-flow Analysis
 
     // DFSanVisitor may create new basic blocks, which confuses df_iterator.
@@ -1014,6 +1038,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
           BranchInst *BI = cast<BranchInst>(Inst);
           if(BI->isConditional()) {
             DFSF.ImmPostDomBlocks.insert(DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock());
+            DFSF.CondBranches.insert(BI);
           }
         }
         Instruction *Next = Inst->getNextNode();
@@ -1046,7 +1071,6 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
           break;
         Inst = Next;
       }
-      //std::cout << "Do all instructions in a block have the same parent? " << test << std::endl;
     }
 
     // We will not necessarily be able to compute the shadow for every phi node
@@ -1885,23 +1909,31 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
 // Start Region: Implementation Control-flow Analysis
 void DFSanVisitor::visitBranchInst(BranchInst &BI) {
   if(BI.isConditional()) {
-    Value *Cond = BI.getCondition();
-    Value *CondShadow = DFSF.getShadow(Cond);
-    Loop* loop = nullptr;
-    if(DFSF.LI) {
-      loop = DFSF.LI->getLoopFor(BI.getParent());
+    Value *CondShadow = DFSF.getShadow(BI.getCondition());
+    BasicBlock *IfTrue = BI.getSuccessor(0);
+    BasicBlock *IfFalse = BI.getSuccessor(1);
+    Loop* loopTrue = DFSF.LI->getLoopFor(IfTrue);
+    Loop* loopFalse = DFSF.LI->getLoopFor(IfFalse);
+    if(!loopTrue && !loopFalse) {
+      if(DFSF.CondBranches.count(&BI)){
+        IRBuilder<> IRB(&BI);
+        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
+      }
     }
-    else {
-      std::cout << "LoopInfo was null" << std::endl;
-    }
-    if(loop) {
+    else
+    {
+      Loop* loop;
+      if(loopTrue) {
+        loop = loopTrue;
+      }
+      else {
+        loop = loopFalse;
+      }
       Instruction *last = loop->getLoopPreheader()->getTerminator();
-      IRBuilder<> IRB(last);
-      IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
-    }
-    else {
-      IRBuilder<> IRB(&BI);
-      IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
+      IRBuilder<> IRBPreheader(last);
+      IRBPreheader.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(DFSF.DFS.ShadowTy, 0) });
+      IRBuilder<> IRBHeader(&BI);
+      IRBHeader.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow });
     }
   }
 }
