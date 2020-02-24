@@ -163,14 +163,20 @@ static void dfsan_check_label(dfsan_label label) {
 // this function (the instrumentation pass inlines the equality test).
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
+  //printf("START __dfsan_union\n");
+  //printf("l1 is %d, l2 is %d\n", l1, l2);
   if (flags().fast16labels)
     return l1 | l2;
   DCHECK_NE(l1, l2);
 
-  if (l1 == 0)
+  if (l1 == 0) {
+    //printf("END __dfsan_union\n\n");
     return l2;
-  if (l2 == 0)
+  }
+  if (l2 == 0) {
+    //printf("END __dfsan_union\n\n");
     return l1;
+  }
 
   if (l1 > l2)
     Swap(l1, l2);
@@ -205,6 +211,8 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
       label = atomic_load(table_ent, memory_order_acquire);
     } while (label == kInitializingLabel);
   }
+  //printf("unified is %d\n", label);
+  //printf("END __dfsan_union\n\n");
   return label;
 }
 
@@ -494,18 +502,18 @@ dfsan_control_scope_label (void) {
 // Called when entering a control structure such as for, if, while, etc.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_enter (dfsan_label label) {
-  printf("START __dfsan_control_enter\n");
-  printf("__dfsan_control_enter label is %d\n", label);
+  //printf("START __dfsan_control_enter\n");
+  //printf("__dfsan_control_enter label is %d\n", label);
   if(__dfsan_control_depth < 1){
     __dfsan_control_array[__dfsan_control_depth] = label;
   }
   else {
-    printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
+    //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
     __dfsan_control_array[__dfsan_control_depth] = dfsan_union(__dfsan_control_array[__dfsan_control_depth-1],label);
   }
   __dfsan_control_depth++;
-  printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
-  printf("END __dfsan_control_enter\n\n");
+  //printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
+  //printf("END __dfsan_control_enter\n\n");
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -516,24 +524,24 @@ dfsan_control_enter (dfsan_label label) {
 // Called after computing the condition for a loop structure to replace the current taint label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_replace (dfsan_label label) {
-  printf("START __dfsan_control_replace\n");
-  printf("__dfsan_control_replace label is %d\n", label);
+  //printf("START __dfsan_control_replace\n");
+  //printf("__dfsan_control_replace label is %d\n", label);
   if(__dfsan_control_depth < 1){
-    printf("WARNING: Trying to replace nonexistent label on stack.\n");
-    printf("Placing label on top of stack.\n");
+    //printf("WARNING: Trying to replace nonexistent label on stack.\n");
+    //printf("Placing label on top of stack.\n");
     __dfsan_control_array[__dfsan_control_depth] = label;
     __dfsan_control_depth++;
   }
   else if(__dfsan_control_depth == 1){
-    printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
+    //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
     __dfsan_control_array[__dfsan_control_depth-1] = label;
   }
   else {
-    printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
+    //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
     __dfsan_control_array[__dfsan_control_depth-1] = dfsan_union(__dfsan_control_array[__dfsan_control_depth-2],label);
   }
-  printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
-  printf("END __dfsan_control_replace\n\n");
+  //printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
+  //printf("END __dfsan_control_replace\n\n");
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -550,6 +558,14 @@ __dfsan_control_leave (void) {
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_leave (void) {
   return __dfsan_control_leave();
+}
+
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
+__dfsan_control_print (dfsan_label label) {
+  //printf("START __dfsan_control_print\n");
+  //printf("The label is %d\n", label);
+  //printf("END __dfsan_control_print\n\n");
+  return ;
 }
 
 // clang++ -O2 -mllvm -disable-llvm-optzns file.cpp -S -emit-llvm -c

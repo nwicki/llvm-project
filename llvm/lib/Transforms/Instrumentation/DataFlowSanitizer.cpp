@@ -367,10 +367,12 @@ class DataFlowSanitizer : public ModulePass {
   FunctionType *DFSanControlReplaceFnTy;
   FunctionType *DFSanControlLeaveFnTy;
   FunctionType *DFSanControlScopeLabelFnTy;
+  FunctionType *DFSanControlPrintFnTy;
   FunctionCallee DFSanControlEnterFn;
   FunctionCallee DFSanControlReplaceFn;
   FunctionCallee DFSanControlLeaveFn;
   FunctionCallee DFSanControlScopeLabelFn;
+  FunctionCallee DFSanControlPrintFn;
 // End Region: Implementation Control-flow Analysis
   MDNode *ColdCallWeights;
   DFSanABIList ABIList;
@@ -633,6 +635,9 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
       FunctionType::get(Type::getVoidTy(*Ctx), None, /*isVarArg=*/false);
   DFSanControlScopeLabelFnTy =
       FunctionType::get(ShadowTy, None, /*isVarArg=*/false);
+  Type *DFSanControlPrintArgs[1] { ShadowTy };
+  DFSanControlPrintFnTy =
+      FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlPrintArgs, /*isVarArg=*/false);
 // End Region: Implementation Control-flow Analysis
 
   if (GetArgTLSPtr) {
@@ -861,6 +866,12 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     DFSanControlScopeLabelFn =
         Mod->getOrInsertFunction("__dfsan_control_scope_label", DFSanControlScopeLabelFnTy);
   }
+  {
+    AttributeList AL;
+    AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
+    DFSanControlPrintFn =
+        Mod->getOrInsertFunction("__dfsan_control_print", DFSanControlPrintFnTy, AL);
+  }
 // End Region: Implementation Control-flow Analysis
 
   std::vector<Function *> FnsToInstrument;
@@ -878,7 +889,8 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         &i != DFSanControlEnterFn.getCallee()->stripPointerCasts() &&
         &i != DFSanControlReplaceFn.getCallee()->stripPointerCasts() &&
         &i != DFSanControlLeaveFn.getCallee()->stripPointerCasts() &&
-        &i != DFSanControlScopeLabelFn.getCallee()->stripPointerCasts()
+        &i != DFSanControlScopeLabelFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanControlPrintFn.getCallee()->stripPointerCasts()
 // End Region: Implementation Control-flow Analysis
         )
 
@@ -1037,8 +1049,11 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         {
           BranchInst *BI = cast<BranchInst>(Inst);
           if(BI->isConditional()) {
-            DFSF.ImmPostDomBlocks.insert(DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock());
-            DFSF.CondBranches.insert(BI);
+            BasicBlock * IPDom = DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock();
+            DFSF.ImmPostDomBlocks.insert(IPDom);
+            if(IPDom) {
+              DFSF.CondBranches.insert(BI);
+            }
           }
         }
         Instruction *Next = Inst->getNextNode();
@@ -1179,6 +1194,10 @@ Value *DFSanFunction::getShadow(Value *V) {
 }
 
 void DFSanFunction::setShadow(Instruction *I, Value *Shadow) {
+// Start Region: Implementation Control-flow Analysis
+//  IRBuilder<> IRB(I);
+//  IRB.CreateCall(DFS.DFSanControlPrintFn, { Shadow });
+// End Region: Implementation Control-flow Analysis
   assert(!ValShadowMap.count(I));
   assert(Shadow->getType() == DFS.ShadowTy);
   ValShadowMap[I] = Shadow;
@@ -1514,15 +1533,25 @@ void DFSanVisitor::visitStoreInst(StoreInst &SI) {
   }
 
   Value* Shadow = DFSF.getShadow(SI.getValueOperand());
+
+// Start Region: Implementation Control-flow Analysis
+    //IRBuilder<> IRBPrint(&SI);
+    //IRBPrint.CreateCall(DFSF.DFS.DFSanControlPrintFn, { Shadow });
+// End Region: Implementation Control-flow Analysis
+
   if (ClCombinePointerLabelsOnStore) {
     Value *PtrShadow = DFSF.getShadow(SI.getPointerOperand());
     Shadow = DFSF.combineShadows(Shadow, PtrShadow, &SI);
+// Start Region: Implementation Control-flow Analysis
+    //IRBPrint.CreateCall(DFSF.DFS.DFSanControlPrintFn, { Shadow });
+// End Region: Implementation Control-flow Analysis
   }
 
 // Start Region: Implementation Control-flow Analysis
     IRBuilder<> IRB(&SI);
     Value *ScopeLabel = IRB.CreateCall(DFSF.DFS.DFSanControlScopeLabelFn, {});
-    Shadow = DFSF.combineShadows(ScopeLabel,Shadow,&SI);
+    //Shadow = IRB.CreateCall(DFSF.DFS.DFSanCheckedUnionFn, { ScopeLabel, Shadow });
+    Shadow = DFSF.combineShadows(Shadow, ScopeLabel, &SI);
 // End Region: Implementation Control-flow Analysis
 
   DFSF.storeShadow(SI.getPointerOperand(), Size, Align, Shadow, &SI);
