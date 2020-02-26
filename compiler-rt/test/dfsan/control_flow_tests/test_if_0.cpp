@@ -1,4 +1,3 @@
-// RUN: %clang_dfsan %s -o %t && %run %t
 #include <assert.h>
 #include <sanitizer/dfsan_interface.h>
 #include <stdio.h>
