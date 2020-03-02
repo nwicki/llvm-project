@@ -1,4 +1,4 @@
-// RUN: %clang_dfsan %s -o %t && %run %t
+// RUN: %clang_dfsan -mllvm -dfsan-cfsan-enable %s -o %t && %run %t
 #include <assert.h>
 #include <sanitizer/dfsan_interface.h>
 #include <stdio.h>

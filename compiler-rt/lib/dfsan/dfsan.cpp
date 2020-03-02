@@ -568,8 +568,9 @@ __dfsan_control_print (dfsan_label label) {
   return ;
 }
 
-// clang++ -O2 -mllvm -disable-llvm-optzns file.cpp -S -emit-llvm -c
-// opt -mem2reg -dfsan file.ll
-// llc -relocation-model=pic -filetype=obj file.ll
+// clang++ -mllvm -disable-llvm-optzns test.cpp -S -emit-llvm
+// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=build/lib/clang/10.0.0/share/dfsan_abilist.txt test.ll -o test_opt.ll
+// llc -relocation-model=pic -filetype=obj test_opt.ll
+// clang++ -fsanitize=dataflow test_opt.o
 // cmake -DLLVM_ENABLE_PROJECTS="clang;compiler-rt;libcxx;libcxxabi" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$(pwd)/../install ../llvm
 // End Region: Implementation Control-flow Analysis
