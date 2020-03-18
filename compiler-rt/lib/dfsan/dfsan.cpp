@@ -568,9 +568,16 @@ __dfsan_control_print (dfsan_label label) {
   return ;
 }
 
+// export PATH=/home/negolas/Documents/hs19/bachelor_thesis/project_code/llvm-project/build/bin/:$PATH
 // clang++ -mllvm -disable-llvm-optzns test.cpp -S -emit-llvm
-// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=build/lib/clang/10.0.0/share/dfsan_abilist.txt test.ll -o test_opt.ll
+// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/llvm-project/dfsan_abilist.txt test.ll -o test_opt.ll
 // llc -relocation-model=pic -filetype=obj test_opt.ll
 // clang++ -fsanitize=dataflow test_opt.o
 // cmake -DLLVM_ENABLE_PROJECTS="clang;compiler-rt;libcxx;libcxxabi" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$(pwd)/../install ../llvm
+// LULESH
+// make
+// llvm-link *.bc -o lulesh_complete.bc
+// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/llvm-project/dfsan_abilist.txt lulesh_complete.bc -o lulesh_complete_opt.bc
+// llc -relocation-model=pic -filetype=obj lulesh_complete_opt.bc
+// clang++ lulesh_complete_opt.o -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/llvm-project/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/llvm-project/build_libcxx/lib -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent/include -I/usr/lib/x86_64-linux-gnu/openmpi/include -pthread -L/usr//lib -L/usr/lib/x86_64-linux-gnu/openmpi/lib -lmpi_cxx -lmpi -Wl,--start-group,-lc++abi
 // End Region: Implementation Control-flow Analysis

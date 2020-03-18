@@ -104,14 +104,17 @@
 #include <vector>
 
 // Start Region: Implementation Control-flow Analysis
-#include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils/LoopSimplify.h"
+#include "llvm/Transforms/Utils.h"
 #include <unordered_set>
 #include <unordered_map>
 #include <iostream>
-#include "llvm/Support/raw_ostream.h"
 // End Region: Implementation Control-flow Analysis
 
 using namespace llvm;
@@ -437,8 +440,8 @@ struct DFSanFunction {
 // Start Region: Implementation Control-flow Analysis
   PostDominatorTree PDT;
   std::unordered_set<BasicBlock *> ImmPostDomBlocks;
-  std::unordered_set<Instruction *> CondBranches;
   std::unordered_map<Instruction *, BasicBlock *> BIPD;
+  std::unordered_map<Loop *, BasicBlock *> LoopPH;
   LoopInfo *LI = nullptr;
 // End Region: Implementation Control-flow Analysis
 
@@ -890,6 +893,9 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
       DFSanControlPrintFn =
           Mod->getOrInsertFunction("__dfsan_control_print", DFSanControlPrintFnTy, AL);
     }
+    legacy::PassManager *PM = new legacy::PassManager();
+    PM->add(createLoopSimplifyPass());
+    PM->run(M);
   }
 // End Region: Implementation Control-flow Analysis
 
@@ -1050,8 +1056,8 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         i = FnsToInstrument.begin() + N;
         e = FnsToInstrument.begin() + Count;
       }
-               // Hopefully, nobody will try to indirectly call a vararg
-               // function... yet.
+      // Hopefully, nobody will try to indirectly call a vararg
+      // function... yet.
     } else if (FT->isVarArg()) {
       UnwrappedFnMap[&F] = &F;
       *i = nullptr;
@@ -1069,6 +1075,13 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
 // Start Region: Implementation Control-flow Analysis
     if(ClEnableControlFlowAnalysis){
       DFSF.LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
+      LoopInfo *LI = DFSF.LI;
+      for(Loop* loop : *LI) {
+        BasicBlock *preHeader = loop->getLoopPreheader();
+        if(preHeader) {
+          DFSF.LoopPH.insert(std::pair<Loop *, BasicBlock *>(loop,preHeader));
+        }
+      }
     }
 // End Region: Implementation Control-flow Analysis
 
@@ -1087,7 +1100,6 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
               BasicBlock * IPDom = DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock();
               if(IPDom) {
                 DFSF.BIPD.insert(std::pair<Instruction *, BasicBlock *>(BI,IPDom));
-                //DFSF.CondBranches.insert(BI);
                 DFSF.ImmPostDomBlocks.insert(IPDom);
               }
             }
@@ -1101,13 +1113,14 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     }
 // End Region: Implementation Control-flow Analysis
     for (BasicBlock *i : BBList) {
-      Instruction *Inst = &i->front();
 // Start Region: Implementation Control-flow Analysis
-      if(ClEnableControlFlowAnalysis && DFSF.ImmPostDomBlocks.count(Inst->getParent())) {
-        IRBuilder<> IRB(Inst);
+      if(ClEnableControlFlowAnalysis && DFSF.ImmPostDomBlocks.count(i)) {
+        Instruction *firstNonPHI = i->getFirstNonPHI();
+        IRBuilder<> IRB(firstNonPHI);
         IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
       }
 // End Region: Implementation Control-flow Analysis
+      Instruction *Inst = &i->front();
       while (true) {
         // DFSanVisitor may split the current basic block, changing the current
         // instruction's next pointer and moving the next instruction to the
@@ -1118,7 +1131,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         bool IsTerminator = Inst->isTerminator();
         if (!DFSF.SkipInsts.count(Inst)) {
           DFSanVisitor(DFSF).visit(Inst);
-          }
+        }
         if (IsTerminator)
           break;
         Inst = Next;
@@ -1231,10 +1244,6 @@ Value *DFSanFunction::getShadow(Value *V) {
 }
 
 void DFSanFunction::setShadow(Instruction *I, Value *Shadow) {
-// Start Region: Implementation Control-flow Analysis
-//  IRBuilder<> IRB(I);
-//  IRB.CreateCall(DFS.DFSanControlPrintFn, { Shadow });
-// End Region: Implementation Control-flow Analysis
   assert(!ValShadowMap.count(I));
   assert(Shadow->getType() == DFS.ShadowTy);
   ValShadowMap[I] = Shadow;
@@ -1998,7 +2007,18 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
         else {
           loop = loopFalse;
         }
-        Instruction *last = loop->getLoopPreheader()->getTerminator();
+        BasicBlock *preHeader = loop->getLoopPreheader();
+        if(!preHeader) {
+          auto pair = DFSF.LoopPH.find(loop);
+          if(pair == DFSF.LoopPH.end()) {
+            return;
+          }
+          preHeader = pair->second;
+          if(!preHeader) {
+            return;
+          }
+        }
+        Instruction *last = &preHeader->back();
         IRBuilder<> IRBPreheader(last);
         IRBPreheader.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(DFSF.DFS.ShadowTy, 0) });
         IRBuilder<> IRBHeader(&BI);
@@ -2007,4 +2027,4 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
     }
   }
 }
-// End Region: Implementation Control-flow Analysis test
+// End Region: Implementation Control-flow Analysis

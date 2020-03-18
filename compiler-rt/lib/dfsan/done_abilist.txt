@@ -28,6 +28,10 @@ fun:dfsan_set_write_callback=uninstrumented
 fun:dfsan_set_write_callback=custom
 fun:dfsan_flush=uninstrumented
 fun:dfsan_flush=discard
+
+###############################################################################
+# CFSan interface functions
+###############################################################################
 fun:dfsan_control_enter=uninstrumented
 fun:dfsan_control_enter=discard
 fun:dfsan_control_replace=uninstrumented
