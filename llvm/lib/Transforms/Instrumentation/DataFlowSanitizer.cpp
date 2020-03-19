@@ -1072,24 +1072,12 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
 
     DFSanFunction DFSF(*this, i, FnsWithNativeABI.count(i));
 
-// Start Region: Implementation Control-flow Analysis
-    if(ClEnableControlFlowAnalysis){
-      DFSF.LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
-      LoopInfo *LI = DFSF.LI;
-      for(Loop* loop : *LI) {
-        BasicBlock *preHeader = loop->getLoopPreheader();
-        if(preHeader) {
-          DFSF.LoopPH.insert(std::pair<Loop *, BasicBlock *>(loop,preHeader));
-        }
-      }
-    }
-// End Region: Implementation Control-flow Analysis
-
     // DFSanVisitor may create new basic blocks, which confuses df_iterator.
     // Build a copy of the list before iterating over it.
     SmallVector<BasicBlock *, 4> BBList(depth_first(&i->getEntryBlock()));
 // Start Region: Implementation Control-flow Analysis
     if(ClEnableControlFlowAnalysis) {
+      DFSF.LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
       for (BasicBlock *i : BBList) {
         Instruction *Inst = &i->front();
         while (true) {
@@ -1101,6 +1089,13 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
               if(IPDom) {
                 DFSF.BIPD.insert(std::pair<Instruction *, BasicBlock *>(BI,IPDom));
                 DFSF.ImmPostDomBlocks.insert(IPDom);
+              }
+              Loop *LpTrue = DFSF.LI->getLoopFor(BI->getSuccessor(0));
+              Loop *LpFalse = DFSF.LI->getLoopFor(BI->getSuccessor(1));
+              Loop *Lp = LpTrue ? LpTrue : LpFalse;
+              if(Lp) {
+                BasicBlock *PreHeader = Lp->getLoopPreheader();
+                DFSF.LoopPH.insert(std::pair<Loop *, BasicBlock *>(Lp,PreHeader));
               }
             }
           }
@@ -1115,8 +1110,8 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     for (BasicBlock *i : BBList) {
 // Start Region: Implementation Control-flow Analysis
       if(ClEnableControlFlowAnalysis && DFSF.ImmPostDomBlocks.count(i)) {
-        Instruction *firstNonPHI = i->getFirstNonPHI();
-        IRBuilder<> IRB(firstNonPHI);
+        Instruction *FirstNonPHI = i->getFirstNonPHI();
+        IRBuilder<> IRB(FirstNonPHI);
         IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
       }
 // End Region: Implementation Control-flow Analysis
@@ -1587,16 +1582,16 @@ void DFSanVisitor::visitStoreInst(StoreInst &SI) {
 
 // Start Region: Implementation Control-flow Analysis
   if(ClEnableControlFlowAnalysis){
-    bool taint = false;
-    std::unordered_map<Instruction *, BasicBlock *>::iterator it = DFSF.BIPD.begin();
-    while(!taint && it != DFSF.BIPD.end()) {
-      Instruction *inst = &it->second->front();
-      if(DFSF.DT.dominates(it->first,&SI) && DFSF.PDT.dominates(inst, &SI)) {
-        taint = true;
+    bool Taint = false;
+    std::unordered_map<Instruction *, BasicBlock *>::iterator It = DFSF.BIPD.begin();
+    while(!Taint && It != DFSF.BIPD.end()) {
+      Instruction *Inst = &It->second->front();
+      if(DFSF.DT.dominates(It->first,&SI) && DFSF.PDT.dominates(Inst, &SI)) {
+        Taint = true;
       }
-      it++;
+      It++;
     }
-    if(taint) {
+    if(Taint) {
       IRBuilder<> IRB(&SI);
       Value *ScopeLabel = IRB.CreateCall(DFSF.DFS.DFSanControlScopeLabelFn, {});
       Shadow = DFSF.combineShadows(Shadow, ScopeLabel, &SI);
@@ -1990,36 +1985,24 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
   if(ClEnableControlFlowAnalysis){
     if(BI.isConditional() && DFSF.BIPD.count(&BI)) {
       Value *CondShadow = DFSF.getShadow(BI.getCondition());
-      BasicBlock *IfTrue = BI.getSuccessor(0);
-      BasicBlock *IfFalse = BI.getSuccessor(1);
-      Loop* loopTrue = DFSF.LI->getLoopFor(IfTrue);
-      Loop* loopFalse = DFSF.LI->getLoopFor(IfFalse);
-      if(!loopTrue && !loopFalse) {
+      Loop* LpTrue = DFSF.LI->getLoopFor(BI.getSuccessor(0));
+      Loop* LpFalse = DFSF.LI->getLoopFor(BI.getSuccessor(1));
+      Loop *Lp = LpTrue ? LpTrue : LpFalse;
+      if(!Lp) {
         IRBuilder<> IRB(&BI);
         IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
       }
-      else
-      {
-        Loop* loop;
-        if(loopTrue) {
-          loop = loopTrue;
+      else {
+        auto Pair = DFSF.LoopPH.find(Lp);
+        if(Pair == DFSF.LoopPH.end()) {
+          return;
         }
-        else {
-          loop = loopFalse;
+        BasicBlock *PreHeader = Pair->second;
+        if(!PreHeader) {
+          return;
         }
-        BasicBlock *preHeader = loop->getLoopPreheader();
-        if(!preHeader) {
-          auto pair = DFSF.LoopPH.find(loop);
-          if(pair == DFSF.LoopPH.end()) {
-            return;
-          }
-          preHeader = pair->second;
-          if(!preHeader) {
-            return;
-          }
-        }
-        Instruction *last = &preHeader->back();
-        IRBuilder<> IRBPreheader(last);
+        Instruction *Last = &PreHeader->back();
+        IRBuilder<> IRBPreheader(Last);
         IRBPreheader.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(DFSF.DFS.ShadowTy, 0) });
         IRBuilder<> IRBHeader(&BI);
         IRBHeader.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow });
