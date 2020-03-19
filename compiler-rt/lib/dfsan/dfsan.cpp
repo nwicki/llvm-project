@@ -474,11 +474,11 @@ static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 // Explicit control flow taint analysis is implemented here.
 // We taint any operand inside the scope of the control structure with
 // the taint incorporated by the condition to enter the control structure.
-
-// Initial size of the data structure for control labels.
-static const int __dfsan_control_array_starting_size = 16;
+#include <stdlib.h>
+// Size of the data structure for control labels.
+static int __dfsan_control_array_size = 16;
 // Data Structure to save the current status of the control structure label.
-dfsan_label __dfsan_control_array[__dfsan_control_array_starting_size];
+dfsan_label *__dfsan_control_array = NULL;
 // Starting depth for control structures.
 static int __dfsan_control_depth = 0;
 
@@ -504,6 +504,10 @@ extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_enter (dfsan_label label) {
   //printf("START __dfsan_control_enter\n");
   //printf("__dfsan_control_enter label is %d\n", label);
+  if(!__dfsan_control_array)
+  {
+    __dfsan_control_array = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
+  }
   if(__dfsan_control_depth < 1){
     __dfsan_control_array[__dfsan_control_depth] = label;
   }
@@ -512,6 +516,21 @@ __dfsan_control_enter (dfsan_label label) {
     __dfsan_control_array[__dfsan_control_depth] = dfsan_union(__dfsan_control_array[__dfsan_control_depth-1],label);
   }
   __dfsan_control_depth++;
+  if(__dfsan_control_depth >= __dfsan_control_array_size) {
+    dfsan_label *new_array = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label)*2);
+    dfsan_label *pos_new = new_array;
+    dfsan_label *pos_old = __dfsan_control_array;
+    dfsan_label *end_old = __dfsan_control_array+__dfsan_control_array_size;
+    while(pos_old != end_old) {
+      *pos_new = *pos_old;
+      pos_new++;
+      pos_old++;
+    }
+    pos_old = __dfsan_control_array;
+    __dfsan_control_array = new_array;
+    end_old = NULL;
+    __dfsan_control_array_size *= 2;
+  }
   //printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
   //printf("END __dfsan_control_enter\n\n");
   return;
