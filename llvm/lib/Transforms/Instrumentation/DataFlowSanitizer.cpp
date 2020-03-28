@@ -473,13 +473,17 @@ struct DFSanFunction {
   Value *getArgTLS(unsigned Index, Instruction *Pos);
   Value *getRetvalTLS();
   Value *getShadow(Value *V);
-  void setShadow(Instruction *I, Value *Shadow);
+  void setShadow(Instruction *I, Value *Shadow, bool Ignore = false);
   Value *combineShadows(Value *V1, Value *V2, Instruction *Pos);
   Value *combineOperandShadows(Instruction *Inst);
   Value *loadShadow(Value *ShadowAddr, uint64_t Size, uint64_t Align,
                     Instruction *Pos);
   void storeShadow(Value *Addr, uint64_t Size, uint64_t Align, Value *Shadow,
                    Instruction *Pos);
+// Start Region: Implementation Control-flow Analysis
+  Value *taintWithScopeLabel(Instruction *Inst, Value *Shadow);
+// End Region: Implementation Control-flow Analysis
+
 };
 
 class DFSanVisitor : public InstVisitor<DFSanVisitor> {
@@ -1238,9 +1242,14 @@ Value *DFSanFunction::getShadow(Value *V) {
   return Shadow;
 }
 
-void DFSanFunction::setShadow(Instruction *I, Value *Shadow) {
+void DFSanFunction::setShadow(Instruction *I, Value *Shadow, bool Ignore /*= false*/) {
   assert(!ValShadowMap.count(I));
   assert(Shadow->getType() == DFS.ShadowTy);
+// Start Region: Implementation Control-flow Analysis
+  if(!Ignore) {
+   Shadow = taintWithScopeLabel(I,Shadow); 
+  }
+// End Region: Implementation Control-flow Analysis
   ValShadowMap[I] = Shadow;
 }
 
@@ -1339,6 +1348,99 @@ Value *DFSanFunction::combineShadows(Value *V1, Value *V2, Instruction *Pos) {
 
   return CCS.Shadow;
 }
+
+// Start Region: Implementation Control-flow Analysis
+Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
+  if(ClEnableControlFlowAnalysis){
+    bool Taint = false;
+    std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
+    while(!Taint && It != BIPD.end()) {
+      BasicBlock *BB = It->second;
+      Instruction *PDInst = BB->getFirstNonPHI();
+      if(DT.dominates(It->first,Inst) && PDT.dominates(PDInst, Inst)) {
+        Taint = true;
+      }
+      It++;
+    }
+    /*if(isa<PHINode>(Inst))
+    {
+      std::cout << "PHINode should be tainted with scope label." << std::endl;
+      if(!Taint)
+      {
+        std::cout << "But won't be. :(" << std::endl;
+      }
+    }*/
+    if(Taint) {
+      Instruction *Pos = Inst;
+      if(isa<PHINode>(Inst)) {
+        Pos = Inst->getParent()->getFirstNonPHI();
+      }
+
+      IRBuilder<> IRB(Pos);
+      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, {});
+      
+      auto Key = std::make_pair(Shadow, ScopeLabel);
+      if (Shadow > ScopeLabel)
+        std::swap(Key.first, Key.second);
+      CachedCombinedShadow &CCS = CachedCombinedShadows[Key];
+      if (CCS.Block && DT.dominates(CCS.Block, Pos->getParent()))
+        Shadow = CCS.Shadow;
+
+      //if (AvoidNewBlocks) {
+        CallInst *Call = IRB.CreateCall(DFS.DFSanCheckedUnionFn, {Shadow, ScopeLabel});
+        Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
+        Call->addParamAttr(0, Attribute::ZExt);
+        Call->addParamAttr(1, Attribute::ZExt);
+
+        CCS.Block = Pos->getParent();
+        CCS.Shadow = Call;
+      /*} else {
+        BasicBlock *Head = Pos->getParent();
+        Value *Ne = IRB.CreateICmpNE(Shadow, ScopeLabel);
+        BranchInst *BI = cast<BranchInst>(SplitBlockAndInsertIfThen(
+            Ne, Pos, /*Unreachable=*//*false, DFS.ColdCallWeights, &DT));
+        IRBuilder<> ThenIRB(BI);
+        CallInst *Call = ThenIRB.CreateCall(DFS.DFSanUnionFn, {Shadow, ScopeLabel});
+        Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
+        Call->addParamAttr(0, Attribute::ZExt);
+        Call->addParamAttr(1, Attribute::ZExt);
+
+        BasicBlock *Tail = BI->getSuccessor(0);
+        PHINode *Phi = PHINode::Create(DFS.ShadowTy, 2, "", &Tail->front());
+        Phi->addIncoming(Call, Call->getParent());
+        Phi->addIncoming(Shadow, Head);
+
+        CCS.Block = Tail;
+        CCS.Shadow = Phi;
+      }*/
+
+      auto V1Elems = ShadowElements.find(Shadow);
+      auto V2Elems = ShadowElements.find(ScopeLabel);
+      if(V2Elems != ShadowElements.end())
+      {
+        std::cout << "ScopeLabel was found in ShadowElements." << std::endl;
+      }
+      std::set<Value *> UnionElems;
+      if (V1Elems != ShadowElements.end()) {
+        UnionElems = V1Elems->second;
+      } else {
+        UnionElems.insert(Shadow);
+      }
+      if (V2Elems != ShadowElements.end()) {
+        UnionElems.insert(V2Elems->second.begin(), V2Elems->second.end());
+      } else {
+        UnionElems.insert(ScopeLabel);
+      }
+      ShadowElements[CCS.Shadow] = std::move(UnionElems);
+
+      Shadow = CCS.Shadow;
+    }
+  }
+  return Shadow;
+}
+// End Region: Implementation Control-flow Analysis
+
+
 
 // A convenience function which folds the shadows of each of the operands
 // of the provided instruction Inst, inserting the IR before Inst.  Returns
@@ -1482,7 +1584,7 @@ void DFSanVisitor::visitLoadInst(LoadInst &LI) {
   auto &DL = LI.getModule()->getDataLayout();
   uint64_t Size = DL.getTypeStoreSize(LI.getType());
   if (Size == 0) {
-    DFSF.setShadow(&LI, DFSF.DFS.ZeroShadow);
+    DFSF.setShadow(&LI, DFSF.DFS.ZeroShadow, true);
     return;
   }
 
@@ -1503,7 +1605,7 @@ void DFSanVisitor::visitLoadInst(LoadInst &LI) {
   if (Shadow != DFSF.DFS.ZeroShadow)
     DFSF.NonZeroChecks.push_back(Shadow);
 
-  DFSF.setShadow(&LI, Shadow);
+  DFSF.setShadow(&LI, Shadow, true);
 }
 
 void DFSanFunction::storeShadow(Value *Addr, uint64_t Size, uint64_t Align,
@@ -1581,22 +1683,7 @@ void DFSanVisitor::visitStoreInst(StoreInst &SI) {
   }
 
 // Start Region: Implementation Control-flow Analysis
-  if(ClEnableControlFlowAnalysis){
-    bool Taint = false;
-    std::unordered_map<Instruction *, BasicBlock *>::iterator It = DFSF.BIPD.begin();
-    while(!Taint && It != DFSF.BIPD.end()) {
-      Instruction *Inst = &It->second->front();
-      if(DFSF.DT.dominates(It->first,&SI) && DFSF.PDT.dominates(Inst, &SI)) {
-        Taint = true;
-      }
-      It++;
-    }
-    if(Taint) {
-      IRBuilder<> IRB(&SI);
-      Value *ScopeLabel = IRB.CreateCall(DFSF.DFS.DFSanControlScopeLabelFn, {});
-      Shadow = DFSF.combineShadows(Shadow, ScopeLabel, &SI);
-    }
-  }
+  Shadow = DFSF.taintWithScopeLabel(&SI,Shadow);
 // End Region: Implementation Control-flow Analysis
 
   DFSF.storeShadow(SI.getPointerOperand(), Size, Align, Shadow, &SI);
@@ -1656,7 +1743,7 @@ void DFSanVisitor::visitAllocaInst(AllocaInst &I) {
     IRBuilder<> IRB(&I);
     DFSF.AllocaShadowMap[&I] = IRB.CreateAlloca(DFSF.DFS.ShadowTy);
   }
-  DFSF.setShadow(&I, DFSF.DFS.ZeroShadow);
+  DFSF.setShadow(&I, DFSF.DFS.ZeroShadow, true);
 }
 
 void DFSanVisitor::visitSelectInst(SelectInst &I) {
@@ -1861,7 +1948,7 @@ void DFSanVisitor::visitCallSite(CallSite CS) {
         if (!FT->getReturnType()->isVoidTy()) {
           LoadInst *LabelLoad =
               IRB.CreateLoad(DFSF.DFS.ShadowTy, DFSF.LabelReturnAlloca);
-          DFSF.setShadow(CustomCI, LabelLoad);
+          DFSF.setShadow(CustomCI, LabelLoad, true);
         }
 
         CI->replaceAllUsesWith(CustomCI);
@@ -1900,7 +1987,7 @@ void DFSanVisitor::visitCallSite(CallSite CS) {
       IRBuilder<> NextIRB(Next);
       LoadInst *LI = NextIRB.CreateLoad(DFSF.DFS.ShadowTy, DFSF.getRetvalTLS());
       DFSF.SkipInsts.insert(LI);
-      DFSF.setShadow(CS.getInstruction(), LI);
+      DFSF.setShadow(CS.getInstruction(), LI, true);
       DFSF.NonZeroChecks.push_back(LI);
     }
   }
@@ -1966,6 +2053,9 @@ void DFSanVisitor::visitCallSite(CallSite CS) {
 }
 
 void DFSanVisitor::visitPHINode(PHINode &PN) {
+// Start Region: Implementation Control-flow Analysis
+  //std::cout << "PHINode visited." << std::endl;
+// End Region: Implementation Control-flow Analysis
   PHINode *ShadowPN =
       PHINode::Create(DFSF.DFS.ShadowTy, PN.getNumIncomingValues(), "", &PN);
 

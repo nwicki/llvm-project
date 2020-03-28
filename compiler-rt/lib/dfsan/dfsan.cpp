@@ -475,10 +475,11 @@ static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 // We taint any operand inside the scope of the control structure with
 // the taint incorporated by the condition to enter the control structure.
 #include <stdlib.h>
+#include <cstring>
 // Size of the data structure for control labels.
 static int __dfsan_control_array_size = 16;
 // Data Structure to save the current status of the control structure label.
-dfsan_label *__dfsan_control_array = NULL;
+static dfsan_label *__dfsan_control_array = NULL;
 // Starting depth for control structures.
 static int __dfsan_control_depth = 0;
 
@@ -504,8 +505,7 @@ extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_enter (dfsan_label label) {
   //printf("START __dfsan_control_enter\n");
   //printf("__dfsan_control_enter label is %d\n", label);
-  if(!__dfsan_control_array)
-  {
+  if(!__dfsan_control_array) {
     __dfsan_control_array = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
   }
   if(__dfsan_control_depth < 1){
@@ -518,17 +518,12 @@ __dfsan_control_enter (dfsan_label label) {
   __dfsan_control_depth++;
   if(__dfsan_control_depth >= __dfsan_control_array_size) {
     dfsan_label *new_array = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label)*2);
-    dfsan_label *pos_new = new_array;
-    dfsan_label *pos_old = __dfsan_control_array;
-    dfsan_label *end_old = __dfsan_control_array+__dfsan_control_array_size;
-    while(pos_old != end_old) {
-      *pos_new = *pos_old;
-      pos_new++;
-      pos_old++;
+    if(!new_array) {
+      printf("Array could not be extended.");
+      exit(1);
     }
-    pos_old = __dfsan_control_array;
+    std::memcpy(new_array, __dfsan_control_array, __dfsan_control_array_size*sizeof(dfsan_label));
     __dfsan_control_array = new_array;
-    end_old = NULL;
     __dfsan_control_array_size *= 2;
   }
   //printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
