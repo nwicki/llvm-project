@@ -479,23 +479,23 @@ static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 #include <sys/types.h>
 #include <unistd.h>
 // Size of the data structure for control labels.
-static thread_local int __dfsan_control_array_size = 2;
+static thread_local int __dfsan_control_array_size = 16;
 // Data Structure to save the current status of the control structure label.
-static thread_local dfsan_label *__dfsan_control_array = NULL;
+static thread_local dfsan_label *__dfsan_control_labels = NULL;
+// Data Structure to save the current status of the control structure label.
+static thread_local int *__dfsan_control_switches = NULL;
 // Starting depth for control structures.
 static thread_local int __dfsan_control_depth = 0;
 
 // Called when we need the label of the current control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 __dfsan_control_scope_label (void) {
-  //printf("START __dfsan_control_scope_label\n");
   //printf("__dfsan_control_depth %d\n", __dfsan_control_depth);
   if(__dfsan_control_depth < 1){
     //printf("END __dfsan_control_scope_label\n\n");
     return 0;
   }
-  //printf("END __dfsan_control_scope_label\n\n");
-  return __dfsan_control_array[__dfsan_control_depth-1];
+  return __dfsan_control_labels[__dfsan_control_depth-1];
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 dfsan_control_scope_label (void) {
@@ -504,43 +504,41 @@ dfsan_control_scope_label (void) {
 
 // Called when entering a control structure such as for, if, while, etc.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_enter (dfsan_label label) {
+__dfsan_control_enter (dfsan_label label, int bi_id) {
   //printf("START __dfsan_control_enter\n");
   //printf("__dfsan_control_enter label is %d\n", label);
-  if(!__dfsan_control_array) {
-    //__dfsan_control_array = new dfsan_label[__dfsan_control_array_size];
-    __dfsan_control_array = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
+  if(!__dfsan_control_labels) {
+    __dfsan_control_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
   }
-  //printf("Line 512 __dfsan_control_enter\n");
+  if(!__dfsan_control_switches) {
+    __dfsan_control_switches = (int *) calloc(__dfsan_control_array_size,sizeof(int));
+  }
   if(__dfsan_control_depth < 1){
-    __dfsan_control_array[__dfsan_control_depth] = label;
-    //printf("Line 515 __dfsan_control_enter\n");
+    __dfsan_control_labels[__dfsan_control_depth] = label;
   }
   else {
     //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
-    __dfsan_control_array[__dfsan_control_depth] = dfsan_union(__dfsan_control_array[__dfsan_control_depth-1],label);
-    //printf("Line 520 __dfsan_control_enter\n");
+    __dfsan_control_labels[__dfsan_control_depth] = dfsan_union(__dfsan_control_labels[__dfsan_control_depth-1],label);
   }
+  __dfsan_control_switches[__dfsan_control_depth] = bi_id;
   __dfsan_control_depth++;
-  //printf("Line 523 __dfsan_control_enter\n"); 
   if(__dfsan_control_depth >= __dfsan_control_array_size) {
-    printf("pid: %lun\n", getpid());
-    printf("array pointer: %p\n", __dfsan_control_array);
-    //printf("Line 525 __dfsan_control_enter\n"); 
-    dfsan_label *new_array = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label)*2);
-    //printf("Line 527 __dfsan_control_enter\n"); 
-    if(!new_array) {
-      printf("Array could not be extended.");
-      exit(1);
+    dfsan_label *new_array_labels = (dfsan_label *) malloc(__dfsan_control_array_size*2*sizeof(dfsan_label));
+    int *new_array_switches = (int *) calloc(__dfsan_control_array_size*2,sizeof(int));
+    //printf("__dfsan_control_array_size: %d\n", __dfsan_control_array_size); 
+    //printf("new __dfsan_control_array_size: %d\n", __dfsan_control_array_size*2);
+    for(int i = 0; i < __dfsan_control_array_size; i++) {
+      //printf("new_array[%d] = __dfsan_control_labels[%d]: %d\n", i, i, __dfsan_control_labels[i]);
+      new_array_labels[i] = __dfsan_control_labels[i];
+      new_array_switches[i] = __dfsan_control_switches[i];
     }
-    //printf("Line 532 __dfsan_control_enter\n"); 
-    //std::copy(__dfsan_control_array, __dfsan_control_array+__dfsan_control_array_size, new_array);
-    memcpy(new_array, __dfsan_control_array, __dfsan_control_array_size*sizeof(dfsan_label));
-    //printf("Line 535 __dfsan_control_enter\n"); 
-    free(__dfsan_control_array);
-    //printf("Line 537 __dfsan_control_enter\n"); 
-    __dfsan_control_array = new_array;
-    //printf("Line 539 __dfsan_control_enter\n"); 
+    //memcpy(new_array, __dfsan_control_labels, __dfsan_control_array_size*sizeof(dfsan_label));
+    //printf("Before free(__dfsan_control_labels);\n");
+    free(__dfsan_control_labels);
+    free(__dfsan_control_switches);
+    //printf("After free(__dfsan_control_labels);\n"); 
+    __dfsan_control_labels = new_array_labels;
+    __dfsan_control_switches = new_array_switches;
     __dfsan_control_array_size *= 2;
   }
   //printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
@@ -549,7 +547,7 @@ __dfsan_control_enter (dfsan_label label) {
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_enter (dfsan_label label) {
-  return __dfsan_control_enter(label);
+  return __dfsan_control_enter(label, 1);
 }
 
 // Called after computing the condition for a loop structure to replace the current taint label.
@@ -557,19 +555,21 @@ extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_replace (dfsan_label label) {
   //printf("START __dfsan_control_replace\n");
   //printf("__dfsan_control_replace label is %d\n", label);
-  if(__dfsan_control_depth < 1){
-    //printf("WARNING: Trying to replace nonexistent label on stack.\n");
-    //printf("Placing label on top of stack.\n");
-    __dfsan_control_array[__dfsan_control_depth] = label;
-    __dfsan_control_depth++;
+  if(__dfsan_control_depth > __dfsan_control_array_size) {
+    printf("Depth greater than array.\n");
+    return;
   }
-  else if(__dfsan_control_depth == 1){
-    //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
-    __dfsan_control_array[__dfsan_control_depth-1] = label;
+  if(__dfsan_control_depth < 0) {
+    printf("Depth negative.\n");
+    return;
   }
-  else {
+  if(__dfsan_control_depth == 1){
     //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
-    __dfsan_control_array[__dfsan_control_depth-1] = dfsan_union(__dfsan_control_array[__dfsan_control_depth-2],label);
+    __dfsan_control_labels[__dfsan_control_depth-1] = label;
+  }
+  else if(__dfsan_control_depth > 1) {
+    //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
+    __dfsan_control_labels[__dfsan_control_depth-1] = dfsan_union(__dfsan_control_labels[__dfsan_control_depth-2],label);
   }
   //printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
   //printf("END __dfsan_control_replace\n\n");
@@ -582,13 +582,20 @@ dfsan_control_replace (dfsan_label label) {
 
 // Called when we leave a control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_leave (void) {
+__dfsan_control_leave (int bi_id) {
+  if(__dfsan_control_depth < 1) {
+    return;
+  }
+  if(__dfsan_control_switches[__dfsan_control_depth-1] != bi_id) {
+    return;
+  }
   __dfsan_control_depth--;
-  return ;
+  __dfsan_control_switches[__dfsan_control_depth] = 0;
+  return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_leave (void) {
-  return __dfsan_control_leave();
+  return __dfsan_control_leave(1);
 }
 
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void

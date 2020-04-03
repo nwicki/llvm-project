@@ -376,6 +376,7 @@ class DataFlowSanitizer : public ModulePass {
   FunctionCallee DFSanNonzeroLabelFn;
   FunctionCallee DFSanVarargWrapperFn;
 // Start Region: Implementation Control-flow Analysis
+  IntegerType *Integer32;
   FunctionType *DFSanControlEnterFnTy;
   FunctionType *DFSanControlReplaceFnTy;
   FunctionType *DFSanControlLeaveFnTy;
@@ -386,6 +387,7 @@ class DataFlowSanitizer : public ModulePass {
   FunctionCallee DFSanControlLeaveFn;
   FunctionCallee DFSanControlScopeLabelFn;
   FunctionCallee DFSanControlPrintFn;
+  int BICount = 0;
 // End Region: Implementation Control-flow Analysis
   MDNode *ColdCallWeights;
   DFSanABIList ABIList;
@@ -441,7 +443,8 @@ struct DFSanFunction {
   PostDominatorTree PDT;
   std::unordered_set<BasicBlock *> ImmPostDomBlocks;
   std::unordered_map<Instruction *, BasicBlock *> BIPD;
-  std::unordered_map<Loop *, BasicBlock *> LoopPH;
+  std::unordered_map<Instruction *, int> BIID;
+  std::unordered_map<Instruction *, BasicBlock *> BIPreHeaders;
   LoopInfo *LI = nullptr;
 // End Region: Implementation Control-flow Analysis
 
@@ -481,6 +484,7 @@ struct DFSanFunction {
   void storeShadow(Value *Addr, uint64_t Size, uint64_t Align, Value *Shadow,
                    Instruction *Pos);
 // Start Region: Implementation Control-flow Analysis
+  void insertControlLeave(Instruction *BI, BasicBlock *PDBlock);
   Value *taintWithScopeLabel(Instruction *Inst, Value *Shadow);
 // End Region: Implementation Control-flow Analysis
 
@@ -646,14 +650,16 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
       Type::getVoidTy(*Ctx), Type::getInt8PtrTy(*Ctx), /*isVarArg=*/false);
 // Start Region: Implementation Control-flow Analysis
   if(ClEnableControlFlowAnalysis){
-    Type *DFSanControlEnterArgs[1] { ShadowTy };
+    Integer32 = IntegerType::get(*Ctx, 32);
+    Type *DFSanControlEnterArgs[2] { ShadowTy, Integer32 };
     DFSanControlEnterFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlEnterArgs, /*isVarArg=*/false);
     Type *DFSanControlReplaceArgs[1] { ShadowTy };
     DFSanControlReplaceFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlReplaceArgs, /*isVarArg=*/false);
+    Type *DFSanControlLeaveArgs[1] { Integer32 };
     DFSanControlLeaveFnTy =
-        FunctionType::get(Type::getVoidTy(*Ctx), None, /*isVarArg=*/false);
+        FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlLeaveArgs, /*isVarArg=*/false);
     DFSanControlScopeLabelFnTy =
         FunctionType::get(ShadowTy, None, /*isVarArg=*/false);
     Type *DFSanControlPrintArgs[1] { ShadowTy };
@@ -873,6 +879,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     {
       AttributeList AL;
       AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
+      AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
       DFSanControlEnterFn =
           Mod->getOrInsertFunction("__dfsan_control_enter", DFSanControlEnterFnTy, AL);
     }
@@ -882,8 +889,12 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
       DFSanControlReplaceFn =
           Mod->getOrInsertFunction("__dfsan_control_replace", DFSanControlReplaceFnTy, AL);
     }
+    {
+      AttributeList AL;
+      AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
       DFSanControlLeaveFn =
           Mod->getOrInsertFunction("__dfsan_control_leave", DFSanControlLeaveFnTy);
+    }
     {
       AttributeList AL;
       AL = AL.addAttribute(M.getContext(), AttributeList::ReturnIndex,
@@ -1085,25 +1096,33 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
       for (BasicBlock *i : BBList) {
         Instruction *Inst = &i->front();
         while (true) {
-          if(isa<BranchInst>(Inst))
+          Instruction *Next = Inst->getNextNode();
+          if(!DFSF.SkipInsts.count(Inst) && isa<BranchInst>(Inst))
           {
             BranchInst *BI = cast<BranchInst>(Inst);
             if(BI->isConditional()) {
               BasicBlock * IPDom = DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock();
               if(IPDom) {
                 DFSF.BIPD.insert(std::pair<Instruction *, BasicBlock *>(BI,IPDom));
+                DFSF.BIID.insert(std::pair<Instruction *, int>(BI,++BICount));
                 DFSF.ImmPostDomBlocks.insert(IPDom);
-              }
-              Loop *LpTrue = DFSF.LI->getLoopFor(BI->getSuccessor(0));
-              Loop *LpFalse = DFSF.LI->getLoopFor(BI->getSuccessor(1));
-              Loop *Lp = LpTrue ? LpTrue : LpFalse;
-              if(Lp) {
-                BasicBlock *PreHeader = Lp->getLoopPreheader();
-                DFSF.LoopPH.insert(std::pair<Loop *, BasicBlock *>(Lp,PreHeader));
+                Loop *LpTrue = DFSF.LI->getLoopFor(BI->getSuccessor(0));
+                Loop *LpFalse = DFSF.LI->getLoopFor(BI->getSuccessor(1));
+                Loop *Lp = LpTrue ? LpTrue : LpFalse;
+                BasicBlock *PreHeader = nullptr;
+                if(Lp) {
+                  PreHeader = Lp->getLoopPreheader();
+                  if(PreHeader) {
+                    DFSF.BIPreHeaders.insert(std::pair<Instruction *, BasicBlock *>(BI,PreHeader));
+                    Instruction *PHPos = PreHeader->getTerminator();
+                    IRBuilder<> IRBPreheader(PHPos);
+                    IRBPreheader.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(DFSF.DFS.ShadowTy, 0), ConstantInt::get(DFSF.DFS.Integer32,(uint64_t) (BICount)) });
+                    DFSF.insertControlLeave(BI, IPDom);
+                  }
+                }
               }
             }
           }
-          Instruction *Next = Inst->getNextNode();
           if (Inst->isTerminator())
             break;
           Inst = Next;
@@ -1112,15 +1131,15 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     }
 // End Region: Implementation Control-flow Analysis
     for (BasicBlock *i : BBList) {
-// Start Region: Implementation Control-flow Analysis
-      if(ClEnableControlFlowAnalysis && DFSF.ImmPostDomBlocks.count(i)) {
-        Instruction *FirstNonPHI = i->getFirstNonPHI();
-        IRBuilder<> IRB(FirstNonPHI);
-        IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
-      }
-// End Region: Implementation Control-flow Analysis
       Instruction *Inst = &i->front();
       while (true) {
+// Start Region: Implementation Control-flow Analysis
+        /*if(ClEnableControlFlowAnalysis && DFSF.ImmPostDomBlocks.count(i)) {
+          Instruction *FirstNonPHI = i->getFirstNonPHI();
+          IRBuilder<> IRB(FirstNonPHI);
+          IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
+        }*/
+// End Region: Implementation Control-flow Analysis
         // DFSanVisitor may split the current basic block, changing the current
         // instruction's next pointer and moving the next instruction to the
         // tail block from which we should continue.
@@ -1348,99 +1367,6 @@ Value *DFSanFunction::combineShadows(Value *V1, Value *V2, Instruction *Pos) {
 
   return CCS.Shadow;
 }
-
-// Start Region: Implementation Control-flow Analysis
-Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
-  if(ClEnableControlFlowAnalysis){
-    bool Taint = false;
-    std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
-    while(!Taint && It != BIPD.end()) {
-      BasicBlock *BB = It->second;
-      Instruction *PDInst = BB->getFirstNonPHI();
-      if(DT.dominates(It->first,Inst) && PDT.dominates(PDInst, Inst)) {
-        Taint = true;
-      }
-      It++;
-    }
-    /*if(isa<PHINode>(Inst))
-    {
-      std::cout << "PHINode should be tainted with scope label." << std::endl;
-      if(!Taint)
-      {
-        std::cout << "But won't be. :(" << std::endl;
-      }
-    }*/
-    if(Taint) {
-      Instruction *Pos = Inst;
-      if(isa<PHINode>(Inst)) {
-        Pos = Inst->getParent()->getFirstNonPHI();
-      }
-
-      IRBuilder<> IRB(Pos);
-      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, {});
-      
-      auto Key = std::make_pair(Shadow, ScopeLabel);
-      if (Shadow > ScopeLabel)
-        std::swap(Key.first, Key.second);
-      CachedCombinedShadow &CCS = CachedCombinedShadows[Key];
-      if (CCS.Block && DT.dominates(CCS.Block, Pos->getParent()))
-        Shadow = CCS.Shadow;
-
-      //if (AvoidNewBlocks) {
-        CallInst *Call = IRB.CreateCall(DFS.DFSanCheckedUnionFn, {Shadow, ScopeLabel});
-        Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
-        Call->addParamAttr(0, Attribute::ZExt);
-        Call->addParamAttr(1, Attribute::ZExt);
-
-        CCS.Block = Pos->getParent();
-        CCS.Shadow = Call;
-      /*} else {
-        BasicBlock *Head = Pos->getParent();
-        Value *Ne = IRB.CreateICmpNE(Shadow, ScopeLabel);
-        BranchInst *BI = cast<BranchInst>(SplitBlockAndInsertIfThen(
-            Ne, Pos, /*Unreachable=*//*false, DFS.ColdCallWeights, &DT));
-        IRBuilder<> ThenIRB(BI);
-        CallInst *Call = ThenIRB.CreateCall(DFS.DFSanUnionFn, {Shadow, ScopeLabel});
-        Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
-        Call->addParamAttr(0, Attribute::ZExt);
-        Call->addParamAttr(1, Attribute::ZExt);
-
-        BasicBlock *Tail = BI->getSuccessor(0);
-        PHINode *Phi = PHINode::Create(DFS.ShadowTy, 2, "", &Tail->front());
-        Phi->addIncoming(Call, Call->getParent());
-        Phi->addIncoming(Shadow, Head);
-
-        CCS.Block = Tail;
-        CCS.Shadow = Phi;
-      }*/
-
-      auto V1Elems = ShadowElements.find(Shadow);
-      auto V2Elems = ShadowElements.find(ScopeLabel);
-      if(V2Elems != ShadowElements.end())
-      {
-        std::cout << "ScopeLabel was found in ShadowElements." << std::endl;
-      }
-      std::set<Value *> UnionElems;
-      if (V1Elems != ShadowElements.end()) {
-        UnionElems = V1Elems->second;
-      } else {
-        UnionElems.insert(Shadow);
-      }
-      if (V2Elems != ShadowElements.end()) {
-        UnionElems.insert(V2Elems->second.begin(), V2Elems->second.end());
-      } else {
-        UnionElems.insert(ScopeLabel);
-      }
-      ShadowElements[CCS.Shadow] = std::move(UnionElems);
-
-      Shadow = CCS.Shadow;
-    }
-  }
-  return Shadow;
-}
-// End Region: Implementation Control-flow Analysis
-
-
 
 // A convenience function which folds the shadows of each of the operands
 // of the provided instruction Inst, inserting the IR before Inst.  Returns
@@ -2074,30 +2000,129 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
 void DFSanVisitor::visitBranchInst(BranchInst &BI) {
   if(ClEnableControlFlowAnalysis){
     if(BI.isConditional() && DFSF.BIPD.count(&BI)) {
-      Value *CondShadow = DFSF.getShadow(BI.getCondition());
-      Loop* LpTrue = DFSF.LI->getLoopFor(BI.getSuccessor(0));
-      Loop* LpFalse = DFSF.LI->getLoopFor(BI.getSuccessor(1));
-      Loop *Lp = LpTrue ? LpTrue : LpFalse;
-      if(!Lp) {
+        Value *CondShadow = DFSF.getShadow(BI.getCondition());
+      if(!DFSF.BIPreHeaders.count(&BI)) {
         IRBuilder<> IRB(&BI);
-        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow });
+        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow, ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) DFSF.BIID.find(&BI)->second) });
+        DFSF.insertControlLeave(&BI, DFSF.BIPD.find(&BI)->second);
       }
-      else {
-        auto Pair = DFSF.LoopPH.find(Lp);
-        if(Pair == DFSF.LoopPH.end()) {
-          return;
-        }
+      else if(DFSF.BIPreHeaders.count(&BI)) {
+        /*auto Pair = DFSF.BIPreHeaders.find(&BI);
+        assert(Pair != DFSF.BIPreHeaders.end());
         BasicBlock *PreHeader = Pair->second;
-        if(!PreHeader) {
+        assert(PreHeader);*/
+
+        /*Pair = DFSF.BIHeaders.find(&BI);
+        assert(Pair != DFSF.BIHeaders.end());
+        BasicBlock *Header = Pair->second;
+        assert(Header);*/
+        /*if(Pair == DFSF.LoopPH.end()) {
           return;
-        }
-        Instruction *Last = &PreHeader->back();
-        IRBuilder<> IRBPreheader(Last);
-        IRBPreheader.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(DFSF.DFS.ShadowTy, 0) });
+        }*/
+        /*if(!PreHeader) {
+          return;
+        }*/
+        //Instruction *HPos = Header->getTerminator();
+
         IRBuilder<> IRBHeader(&BI);
         IRBHeader.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow });
       }
     }
   }
+}
+
+void DFSanFunction::insertControlLeave(Instruction *BI, BasicBlock *PDBlock) {
+  Instruction *FirstNonPHI = PDBlock->getFirstNonPHI();
+  IRBuilder<> IRBLeave(FirstNonPHI);
+  IRBLeave.CreateCall(DFS.DFSanControlLeaveFn, { ConstantInt::get(DFS.Integer32, (uint64_t) BIID.find(BI)->second) });
+}
+
+Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
+  if(ClEnableControlFlowAnalysis){
+    bool Taint = false;
+    std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
+    while(!Taint && It != BIPD.end()) {
+      BasicBlock *BB = It->second;
+      Instruction *PDInst = BB->getFirstNonPHI();
+      if(DT.dominates(It->first,Inst) && PDT.dominates(PDInst, Inst)) {
+        Taint = true;
+      }
+      It++;
+    }
+    /*if(isa<PHINode>(Inst))
+    {
+      std::cout << "PHINode should be tainted with scope label." << std::endl;
+      if(!Taint)
+      {
+        std::cout << "But won't be. :(" << std::endl;
+      }
+    }*/
+    if(Taint) {
+      Instruction *Pos = Inst;
+      if(isa<PHINode>(Inst)) {
+        Pos = Inst->getParent()->getFirstNonPHI();
+      }
+
+      IRBuilder<> IRB(Pos);
+      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, {});
+      
+      auto Key = std::make_pair(Shadow, ScopeLabel);
+      if (Shadow > ScopeLabel)
+        std::swap(Key.first, Key.second);
+      CachedCombinedShadow &CCS = CachedCombinedShadows[Key];
+      if (CCS.Block && DT.dominates(CCS.Block, Pos->getParent()))
+        Shadow = CCS.Shadow;
+
+      //if (AvoidNewBlocks) {
+        CallInst *Call = IRB.CreateCall(DFS.DFSanCheckedUnionFn, {Shadow, ScopeLabel});
+        Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
+        Call->addParamAttr(0, Attribute::ZExt);
+        Call->addParamAttr(1, Attribute::ZExt);
+
+        CCS.Block = Pos->getParent();
+        CCS.Shadow = Call;
+      /*} else {
+        BasicBlock *Head = Pos->getParent();
+        Value *Ne = IRB.CreateICmpNE(Shadow, ScopeLabel);
+        BranchInst *BI = cast<BranchInst>(SplitBlockAndInsertIfThen(
+            Ne, Pos, /*Unreachable=*//*false, DFS.ColdCallWeights, &DT));
+        IRBuilder<> ThenIRB(BI);
+        CallInst *Call = ThenIRB.CreateCall(DFS.DFSanUnionFn, {Shadow, ScopeLabel});
+        Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
+        Call->addParamAttr(0, Attribute::ZExt);
+        Call->addParamAttr(1, Attribute::ZExt);
+
+        BasicBlock *Tail = BI->getSuccessor(0);
+        PHINode *Phi = PHINode::Create(DFS.ShadowTy, 2, "", &Tail->front());
+        Phi->addIncoming(Call, Call->getParent());
+        Phi->addIncoming(Shadow, Head);
+
+        CCS.Block = Tail;
+        CCS.Shadow = Phi;
+      }*/
+
+      auto V1Elems = ShadowElements.find(Shadow);
+      auto V2Elems = ShadowElements.find(ScopeLabel);
+      if(V2Elems != ShadowElements.end())
+      {
+        std::cout << "ScopeLabel was found in ShadowElements." << std::endl;
+      }
+      std::set<Value *> UnionElems;
+      if (V1Elems != ShadowElements.end()) {
+        UnionElems = V1Elems->second;
+      } else {
+        UnionElems.insert(Shadow);
+      }
+      if (V2Elems != ShadowElements.end()) {
+        UnionElems.insert(V2Elems->second.begin(), V2Elems->second.end());
+      } else {
+        UnionElems.insert(ScopeLabel);
+      }
+      ShadowElements[CCS.Shadow] = std::move(UnionElems);
+
+      Shadow = CCS.Shadow;
+    }
+  }
+  return Shadow;
 }
 // End Region: Implementation Control-flow Analysis
