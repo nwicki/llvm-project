@@ -490,9 +490,7 @@ static thread_local int __dfsan_control_depth = 0;
 // Called when we need the label of the current control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 __dfsan_control_scope_label (void) {
-  //printf("__dfsan_control_depth %d\n", __dfsan_control_depth);
   if(__dfsan_control_depth < 1){
-    //printf("END __dfsan_control_scope_label\n\n");
     return 0;
   }
   return __dfsan_control_labels[__dfsan_control_depth-1];
@@ -505,8 +503,6 @@ dfsan_control_scope_label (void) {
 // Called when entering a control structure such as for, if, while, etc.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_enter (dfsan_label label, int bi_id) {
-  //printf("START __dfsan_control_enter\n");
-  //printf("__dfsan_control_enter label is %d\n", label);
   if(!__dfsan_control_labels) {
     __dfsan_control_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
   }
@@ -517,7 +513,6 @@ __dfsan_control_enter (dfsan_label label, int bi_id) {
     __dfsan_control_labels[__dfsan_control_depth] = label;
   }
   else {
-    //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
     __dfsan_control_labels[__dfsan_control_depth] = dfsan_union(__dfsan_control_labels[__dfsan_control_depth-1],label);
   }
   __dfsan_control_switches[__dfsan_control_depth] = bi_id;
@@ -525,24 +520,17 @@ __dfsan_control_enter (dfsan_label label, int bi_id) {
   if(__dfsan_control_depth >= __dfsan_control_array_size) {
     dfsan_label *new_array_labels = (dfsan_label *) malloc(__dfsan_control_array_size*2*sizeof(dfsan_label));
     int *new_array_switches = (int *) calloc(__dfsan_control_array_size*2,sizeof(int));
-    //printf("__dfsan_control_array_size: %d\n", __dfsan_control_array_size); 
-    //printf("new __dfsan_control_array_size: %d\n", __dfsan_control_array_size*2);
     for(int i = 0; i < __dfsan_control_array_size; i++) {
-      //printf("new_array[%d] = __dfsan_control_labels[%d]: %d\n", i, i, __dfsan_control_labels[i]);
       new_array_labels[i] = __dfsan_control_labels[i];
       new_array_switches[i] = __dfsan_control_switches[i];
     }
     //memcpy(new_array, __dfsan_control_labels, __dfsan_control_array_size*sizeof(dfsan_label));
-    //printf("Before free(__dfsan_control_labels);\n");
     free(__dfsan_control_labels);
     free(__dfsan_control_switches);
-    //printf("After free(__dfsan_control_labels);\n"); 
     __dfsan_control_labels = new_array_labels;
     __dfsan_control_switches = new_array_switches;
     __dfsan_control_array_size *= 2;
   }
-  //printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
-  //printf("END __dfsan_control_enter\n\n");
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -553,8 +541,6 @@ dfsan_control_enter (dfsan_label label) {
 // Called after computing the condition for a loop structure to replace the current taint label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_replace (dfsan_label label) {
-  //printf("START __dfsan_control_replace\n");
-  //printf("__dfsan_control_replace label is %d\n", label);
   if(__dfsan_control_depth > __dfsan_control_array_size) {
     printf("Depth greater than array.\n");
     return;
@@ -564,15 +550,11 @@ __dfsan_control_replace (dfsan_label label) {
     return;
   }
   if(__dfsan_control_depth == 1){
-    //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
     __dfsan_control_labels[__dfsan_control_depth-1] = label;
   }
   else if(__dfsan_control_depth > 1) {
-    //printf("__dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
     __dfsan_control_labels[__dfsan_control_depth-1] = dfsan_union(__dfsan_control_labels[__dfsan_control_depth-2],label);
   }
-  //printf("new __dfsan_control_scope_label is %d\n", dfsan_control_scope_label());
-  //printf("END __dfsan_control_replace\n\n");
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -600,9 +582,6 @@ dfsan_control_leave (void) {
 
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_print (dfsan_label label) {
-  //printf("START __dfsan_control_print\n");
-  //printf("The label is %d\n", label);
-  //printf("END __dfsan_control_print\n\n");
   return ;
 }
 

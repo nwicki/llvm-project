@@ -1979,9 +1979,6 @@ void DFSanVisitor::visitCallSite(CallSite CS) {
 }
 
 void DFSanVisitor::visitPHINode(PHINode &PN) {
-// Start Region: Implementation Control-flow Analysis
-  //std::cout << "PHINode visited." << std::endl;
-// End Region: Implementation Control-flow Analysis
   PHINode *ShadowPN =
       PHINode::Create(DFSF.DFS.ShadowTy, PN.getNumIncomingValues(), "", &PN);
 
@@ -2041,6 +2038,7 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
   if(ClEnableControlFlowAnalysis){
     bool Taint = false;
     std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
+    // We check whether the instruction to be tainted is inside the scope of a branch.
     while(!Taint && It != BIPD.end()) {
       BasicBlock *BB = It->second;
       Instruction *PDInst = BB->getFirstNonPHI();
@@ -2049,14 +2047,8 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
       }
       It++;
     }
-    /*if(isa<PHINode>(Inst))
-    {
-      std::cout << "PHINode should be tainted with scope label." << std::endl;
-      if(!Taint)
-      {
-        std::cout << "But won't be. :(" << std::endl;
-      }
-    }*/
+
+    // If the instruction is no in a branch scope, we do not need to taint it.
     if(Taint) {
       Instruction *Pos = Inst;
       if(isa<PHINode>(Inst)) {
@@ -2066,60 +2058,31 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
       IRBuilder<> IRB(Pos);
       Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, {});
       
+      // Code from combineShadows
       auto Key = std::make_pair(Shadow, ScopeLabel);
       if (Shadow > ScopeLabel)
         std::swap(Key.first, Key.second);
       CachedCombinedShadow &CCS = CachedCombinedShadows[Key];
+
       if (CCS.Block && DT.dominates(CCS.Block, Pos->getParent()))
         Shadow = CCS.Shadow;
 
-      //if (AvoidNewBlocks) {
-        CallInst *Call = IRB.CreateCall(DFS.DFSanCheckedUnionFn, {Shadow, ScopeLabel});
-        Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
-        Call->addParamAttr(0, Attribute::ZExt);
-        Call->addParamAttr(1, Attribute::ZExt);
-
-        CCS.Block = Pos->getParent();
-        CCS.Shadow = Call;
-      /*} else {
-        BasicBlock *Head = Pos->getParent();
-        Value *Ne = IRB.CreateICmpNE(Shadow, ScopeLabel);
-        BranchInst *BI = cast<BranchInst>(SplitBlockAndInsertIfThen(
-            Ne, Pos, /*Unreachable=*//*false, DFS.ColdCallWeights, &DT));
-        IRBuilder<> ThenIRB(BI);
-        CallInst *Call = ThenIRB.CreateCall(DFS.DFSanUnionFn, {Shadow, ScopeLabel});
-        Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
-        Call->addParamAttr(0, Attribute::ZExt);
-        Call->addParamAttr(1, Attribute::ZExt);
-
-        BasicBlock *Tail = BI->getSuccessor(0);
-        PHINode *Phi = PHINode::Create(DFS.ShadowTy, 2, "", &Tail->front());
-        Phi->addIncoming(Call, Call->getParent());
-        Phi->addIncoming(Shadow, Head);
-
-        CCS.Block = Tail;
-        CCS.Shadow = Phi;
-      }*/
-
+      CallInst *Call = IRB.CreateCall(DFS.DFSanCheckedUnionFn, {Shadow, ScopeLabel});
+      Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
+      Call->addParamAttr(0, Attribute::ZExt);
+      Call->addParamAttr(1, Attribute::ZExt);
+      CCS.Block = Pos->getParent();
+      CCS.Shadow = Call;
       auto V1Elems = ShadowElements.find(Shadow);
-      auto V2Elems = ShadowElements.find(ScopeLabel);
-      if(V2Elems != ShadowElements.end())
-      {
-        std::cout << "ScopeLabel was found in ShadowElements." << std::endl;
-      }
       std::set<Value *> UnionElems;
       if (V1Elems != ShadowElements.end()) {
         UnionElems = V1Elems->second;
       } else {
         UnionElems.insert(Shadow);
       }
-      if (V2Elems != ShadowElements.end()) {
-        UnionElems.insert(V2Elems->second.begin(), V2Elems->second.end());
-      } else {
-        UnionElems.insert(ScopeLabel);
-      }
+      // ScopeLabel is generated at runtime which is why we cannot know during compile time.
+      UnionElems.insert(ScopeLabel);
       ShadowElements[CCS.Shadow] = std::move(UnionElems);
-
       Shadow = CCS.Shadow;
     }
   }
