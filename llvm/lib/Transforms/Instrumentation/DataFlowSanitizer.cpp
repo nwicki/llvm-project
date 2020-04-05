@@ -441,11 +441,9 @@ struct DFSanFunction {
   bool AvoidNewBlocks;
 // Start Region: Implementation Control-flow Analysis
   PostDominatorTree PDT;
-  std::unordered_set<BasicBlock *> ImmPostDomBlocks;
   std::unordered_map<Instruction *, BasicBlock *> BIPD;
   std::unordered_map<Instruction *, int> BIID;
   std::unordered_map<Instruction *, BasicBlock *> BIPreHeaders;
-  LoopInfo *LI = nullptr;
 // End Region: Implementation Control-flow Analysis
 
 
@@ -1092,7 +1090,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     SmallVector<BasicBlock *, 4> BBList(depth_first(&i->getEntryBlock()));
 // Start Region: Implementation Control-flow Analysis
     if(ClEnableControlFlowAnalysis) {
-      DFSF.LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
+      LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
       for (BasicBlock *i : BBList) {
         Instruction *Inst = &i->front();
         while (true) {
@@ -1105,10 +1103,8 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
               if(IPDom) {
                 DFSF.BIPD.insert(std::pair<Instruction *, BasicBlock *>(BI,IPDom));
                 DFSF.BIID.insert(std::pair<Instruction *, int>(BI,++BICount));
-                DFSF.ImmPostDomBlocks.insert(IPDom);
-                Loop *LpTrue = DFSF.LI->getLoopFor(BI->getSuccessor(0));
-                Loop *LpFalse = DFSF.LI->getLoopFor(BI->getSuccessor(1));
-                Loop *Lp = LpTrue ? LpTrue : LpFalse;
+                Loop *LpTrue = LI->getLoopFor(BI->getSuccessor(0));
+                Loop *Lp = LpTrue ? LpTrue : LI->getLoopFor(BI->getSuccessor(1));
                 BasicBlock *PreHeader = nullptr;
                 if(Lp) {
                   PreHeader = Lp->getLoopPreheader();
@@ -1133,13 +1129,6 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     for (BasicBlock *i : BBList) {
       Instruction *Inst = &i->front();
       while (true) {
-// Start Region: Implementation Control-flow Analysis
-        /*if(ClEnableControlFlowAnalysis && DFSF.ImmPostDomBlocks.count(i)) {
-          Instruction *FirstNonPHI = i->getFirstNonPHI();
-          IRBuilder<> IRB(FirstNonPHI);
-          IRB.CreateCall(DFSF.DFS.DFSanControlLeaveFn, {});
-        }*/
-// End Region: Implementation Control-flow Analysis
         // DFSanVisitor may split the current basic block, changing the current
         // instruction's next pointer and moving the next instruction to the
         // tail block from which we should continue.
@@ -1994,40 +1983,24 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
 }
 
 // Start Region: Implementation Control-flow Analysis
+// Handles conditional branches and inserts a call to the control enter function if it is a non-loop conditional branch.
 void DFSanVisitor::visitBranchInst(BranchInst &BI) {
   if(ClEnableControlFlowAnalysis){
     if(BI.isConditional() && DFSF.BIPD.count(&BI)) {
         Value *CondShadow = DFSF.getShadow(BI.getCondition());
-      if(!DFSF.BIPreHeaders.count(&BI)) {
         IRBuilder<> IRB(&BI);
+      if(!DFSF.BIPreHeaders.count(&BI)) {
         IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow, ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) DFSF.BIID.find(&BI)->second) });
         DFSF.insertControlLeave(&BI, DFSF.BIPD.find(&BI)->second);
       }
       else if(DFSF.BIPreHeaders.count(&BI)) {
-        /*auto Pair = DFSF.BIPreHeaders.find(&BI);
-        assert(Pair != DFSF.BIPreHeaders.end());
-        BasicBlock *PreHeader = Pair->second;
-        assert(PreHeader);*/
-
-        /*Pair = DFSF.BIHeaders.find(&BI);
-        assert(Pair != DFSF.BIHeaders.end());
-        BasicBlock *Header = Pair->second;
-        assert(Header);*/
-        /*if(Pair == DFSF.LoopPH.end()) {
-          return;
-        }*/
-        /*if(!PreHeader) {
-          return;
-        }*/
-        //Instruction *HPos = Header->getTerminator();
-
-        IRBuilder<> IRBHeader(&BI);
-        IRBHeader.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow });
+        IRB.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow });
       }
     }
   }
 }
 
+// Inserts the call to the control leave function.
 void DFSanFunction::insertControlLeave(Instruction *BI, BasicBlock *PDBlock) {
   Instruction *FirstNonPHI = PDBlock->getFirstNonPHI();
   IRBuilder<> IRBLeave(FirstNonPHI);
