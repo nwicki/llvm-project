@@ -381,12 +381,10 @@ class DataFlowSanitizer : public ModulePass {
   FunctionType *DFSanControlReplaceFnTy;
   FunctionType *DFSanControlLeaveFnTy;
   FunctionType *DFSanControlScopeLabelFnTy;
-  FunctionType *DFSanControlPrintFnTy;
   FunctionCallee DFSanControlEnterFn;
   FunctionCallee DFSanControlReplaceFn;
   FunctionCallee DFSanControlLeaveFn;
   FunctionCallee DFSanControlScopeLabelFn;
-  FunctionCallee DFSanControlPrintFn;
   int BICount = 0;
 // End Region: Implementation Control-flow Analysis
   MDNode *ColdCallWeights;
@@ -660,9 +658,6 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlLeaveArgs, /*isVarArg=*/false);
     DFSanControlScopeLabelFnTy =
         FunctionType::get(ShadowTy, None, /*isVarArg=*/false);
-    Type *DFSanControlPrintArgs[1] { ShadowTy };
-    DFSanControlPrintFnTy =
-        FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlPrintArgs, /*isVarArg=*/false);
   }
 // End Region: Implementation Control-flow Analysis
 
@@ -900,12 +895,6 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
       DFSanControlScopeLabelFn =
           Mod->getOrInsertFunction("__dfsan_control_scope_label", DFSanControlScopeLabelFnTy);
     }
-    {
-      AttributeList AL;
-      AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
-      DFSanControlPrintFn =
-          Mod->getOrInsertFunction("__dfsan_control_print", DFSanControlPrintFnTy, AL);
-    }
     legacy::PassManager *PM = new legacy::PassManager();
     PM->add(createLoopSimplifyPass());
     PM->run(M);
@@ -929,8 +918,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
           &i != DFSanControlEnterFn.getCallee()->stripPointerCasts() &&
           &i != DFSanControlReplaceFn.getCallee()->stripPointerCasts() &&
           &i != DFSanControlLeaveFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanControlScopeLabelFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanControlPrintFn.getCallee()->stripPointerCasts())
+          &i != DFSanControlScopeLabelFn.getCallee()->stripPointerCasts())
         FnsToInstrument.push_back(&i);
     }
 // End Region: Implementation Control-flow Analysis
