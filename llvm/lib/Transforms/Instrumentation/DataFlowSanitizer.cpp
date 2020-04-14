@@ -472,7 +472,7 @@ struct DFSanFunction {
   Value *getArgTLS(unsigned Index, Instruction *Pos);
   Value *getRetvalTLS();
   Value *getShadow(Value *V);
-  void setShadow(Instruction *I, Value *Shadow, bool Ignore = false);
+  void setShadow(Instruction *I, Value *Shadow);
   Value *combineShadows(Value *V1, Value *V2, Instruction *Pos);
   Value *combineOperandShadows(Instruction *Inst);
   Value *loadShadow(Value *ShadowAddr, uint64_t Size, uint64_t Align,
@@ -1238,14 +1238,9 @@ Value *DFSanFunction::getShadow(Value *V) {
   return Shadow;
 }
 
-void DFSanFunction::setShadow(Instruction *I, Value *Shadow, bool Ignore /*= false*/) {
+void DFSanFunction::setShadow(Instruction *I, Value *Shadow) {
   assert(!ValShadowMap.count(I));
   assert(Shadow->getType() == DFS.ShadowTy);
-// Start Region: Implementation Control-flow Analysis
-  if(!Ignore) {
-   Shadow = taintWithScopeLabel(I,Shadow); 
-  }
-// End Region: Implementation Control-flow Analysis
   ValShadowMap[I] = Shadow;
 }
 
@@ -1487,7 +1482,7 @@ void DFSanVisitor::visitLoadInst(LoadInst &LI) {
   auto &DL = LI.getModule()->getDataLayout();
   uint64_t Size = DL.getTypeStoreSize(LI.getType());
   if (Size == 0) {
-    DFSF.setShadow(&LI, DFSF.DFS.ZeroShadow, true);
+    DFSF.setShadow(&LI, DFSF.DFS.ZeroShadow);
     return;
   }
 
@@ -1508,7 +1503,7 @@ void DFSanVisitor::visitLoadInst(LoadInst &LI) {
   if (Shadow != DFSF.DFS.ZeroShadow)
     DFSF.NonZeroChecks.push_back(Shadow);
 
-  DFSF.setShadow(&LI, Shadow, true);
+  DFSF.setShadow(&LI, Shadow);
 }
 
 void DFSanFunction::storeShadow(Value *Addr, uint64_t Size, uint64_t Align,
@@ -1646,7 +1641,7 @@ void DFSanVisitor::visitAllocaInst(AllocaInst &I) {
     IRBuilder<> IRB(&I);
     DFSF.AllocaShadowMap[&I] = IRB.CreateAlloca(DFSF.DFS.ShadowTy);
   }
-  DFSF.setShadow(&I, DFSF.DFS.ZeroShadow, true);
+  DFSF.setShadow(&I, DFSF.DFS.ZeroShadow);
 }
 
 void DFSanVisitor::visitSelectInst(SelectInst &I) {
@@ -1851,7 +1846,7 @@ void DFSanVisitor::visitCallSite(CallSite CS) {
         if (!FT->getReturnType()->isVoidTy()) {
           LoadInst *LabelLoad =
               IRB.CreateLoad(DFSF.DFS.ShadowTy, DFSF.LabelReturnAlloca);
-          DFSF.setShadow(CustomCI, LabelLoad, true);
+          DFSF.setShadow(CustomCI, LabelLoad);
         }
 
         CI->replaceAllUsesWith(CustomCI);
@@ -1890,7 +1885,7 @@ void DFSanVisitor::visitCallSite(CallSite CS) {
       IRBuilder<> NextIRB(Next);
       LoadInst *LI = NextIRB.CreateLoad(DFSF.DFS.ShadowTy, DFSF.getRetvalTLS());
       DFSF.SkipInsts.insert(LI);
-      DFSF.setShadow(CS.getInstruction(), LI, true);
+      DFSF.setShadow(CS.getInstruction(), LI);
       DFSF.NonZeroChecks.push_back(LI);
     }
   }
@@ -1967,7 +1962,10 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
   }
 
   DFSF.PHIFixups.push_back(std::make_pair(&PN, ShadowPN));
-  DFSF.setShadow(&PN, ShadowPN);
+// Start Region: Implementation Control-flow Analysis
+  Value *Shadow = DFSF.taintWithScopeLabel(&PN,ShadowPN);
+// End Region: Implementation Control-flow Analysis
+  DFSF.setShadow(&PN, Shadow);
 }
 
 // Start Region: Implementation Control-flow Analysis
