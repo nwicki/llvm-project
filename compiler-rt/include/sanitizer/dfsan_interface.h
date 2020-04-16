@@ -116,7 +116,7 @@ void dfsan_control_replace (dfsan_label label);
 // Reduces the depth of control flow tainting
 void dfsan_control_leave (void);
 // Returns the label of the current scope
-dfsan_label dfsan_control_scope_label (void);
+dfsan_label dfsan_control_scope_label (int unified);
 // End Region: Implementation Control-flow Analysis
 #ifdef __cplusplus
 }  // extern "C"

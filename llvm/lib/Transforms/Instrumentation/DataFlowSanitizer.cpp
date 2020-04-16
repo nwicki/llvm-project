@@ -474,7 +474,7 @@ struct DFSanFunction {
   void storeShadow(Value *Addr, uint64_t Size, uint64_t Align, Value *Shadow,
                    Instruction *Pos);
 // Start Region: Implementation Control-flow Analysis
-  Value *taintWithScopeLabel(Instruction *Inst, Value *Shadow);
+  Value *taintWithScopeLabel(Instruction *Inst, Value *Shadow, int unified);
   void insertControlLeave(Instruction *BI, BasicBlock *PDBlock);
 // End Region: Implementation Control-flow Analysis
 };
@@ -646,8 +646,9 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
     Type *DFSanControlReplaceArgs[1] { ShadowTy };
     DFSanControlReplaceFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlReplaceArgs, /*isVarArg=*/false);
+    Type *DFSanControlLabelArgs[1] { Integer32 };
     DFSanControlScopeLabelFnTy =
-        FunctionType::get(ShadowTy, None, /*isVarArg=*/false);
+        FunctionType::get(ShadowTy, DFSanControlLabelArgs, /*isVarArg=*/false);
     Type *DFSanControlLeaveArgs[1] { Integer32 };
     DFSanControlLeaveFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlLeaveArgs, /*isVarArg=*/false);
@@ -876,6 +877,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     }
     {
       AttributeList AL;
+      AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
       AL = AL.addAttribute(M.getContext(), AttributeList::ReturnIndex,
                            Attribute::ZExt);
       DFSanControlScopeLabelFn =
@@ -1566,7 +1568,7 @@ void DFSanVisitor::visitStoreInst(StoreInst &SI) {
     Shadow = DFSF.combineShadows(Shadow, PtrShadow, &SI);
   }
 // Start Region: Implementation Control-flow Analysis
-  Shadow = DFSF.taintWithScopeLabel(&SI,Shadow);
+  Shadow = DFSF.taintWithScopeLabel(&SI,Shadow,1);
 // End Region: Implementation Control-flow Analysis
   DFSF.storeShadow(SI.getPointerOperand(), Size, Align, Shadow, &SI);
 }
@@ -1947,7 +1949,7 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
 
   DFSF.PHIFixups.push_back(std::make_pair(&PN, ShadowPN));
 // Start Region: Implementation Control-flow Analysis
-  Value *Shadow = DFSF.taintWithScopeLabel(&PN,ShadowPN);
+  Value *Shadow = DFSF.taintWithScopeLabel(&PN,ShadowPN,0);
 // End Region: Implementation Control-flow Analysis
   DFSF.setShadow(&PN, Shadow);
 }
@@ -1978,7 +1980,7 @@ void DFSanFunction::insertControlLeave(Instruction *BI, BasicBlock *PDBlock) {
 }
 
 // Function call which unifies the taint of an existing value with the scope label.
-Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
+Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int unified) {
   if(ClEnableControlFlowAnalysis){
     bool Taint = false;
     std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
@@ -2000,7 +2002,7 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
       }
 
       IRBuilder<> IRB(Pos);
-      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, {});
+      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, {ConstantInt::get(DFS.Integer32, (uint64_t) unified)});
       
       // Code from combineShadows
       auto Key = std::make_pair(Shadow, ScopeLabel);
