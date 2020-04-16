@@ -108,9 +108,7 @@ void dfsan_weak_hook_memcmp(void *caller_pc, const void *s1, const void *s2,
 void dfsan_weak_hook_strncmp(void *caller_pc, const char *s1, const char *s2,
                              size_t n, dfsan_label s1_label,
                              dfsan_label s2_label, dfsan_label n_label);
-
 // Start Region: Implementation Control-flow Analysis
-
 // Raises the depth of control flow tainting
 void dfsan_control_enter (dfsan_label label);
 // Replaces the control scope label with an updated loop label
@@ -119,9 +117,7 @@ void dfsan_control_replace (dfsan_label label);
 void dfsan_control_leave (void);
 // Returns the label of the current scope
 dfsan_label dfsan_control_scope_label (void);
-
 // End Region: Implementation Control-flow Analysis
-
 #ifdef __cplusplus
 }  // extern "C"
 

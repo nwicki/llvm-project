@@ -195,7 +195,6 @@ static cl::opt<bool> ClEnableControlFlowAnalysis(
     cl::init(false));
 // End Region: Implementation Control-flow Analysis
 
-
 namespace {
 
 class DFSanABIList {
@@ -379,12 +378,12 @@ class DataFlowSanitizer : public ModulePass {
   IntegerType *Integer32;
   FunctionType *DFSanControlEnterFnTy;
   FunctionType *DFSanControlReplaceFnTy;
-  FunctionType *DFSanControlLeaveFnTy;
   FunctionType *DFSanControlScopeLabelFnTy;
+  FunctionType *DFSanControlLeaveFnTy;
   FunctionCallee DFSanControlEnterFn;
   FunctionCallee DFSanControlReplaceFn;
-  FunctionCallee DFSanControlLeaveFn;
   FunctionCallee DFSanControlScopeLabelFn;
+  FunctionCallee DFSanControlLeaveFn;
   int BICount = 0;
 // End Region: Implementation Control-flow Analysis
   MDNode *ColdCallWeights;
@@ -419,7 +418,6 @@ public:
 // Start Region: Implementation Control-flow Analysis
   void getAnalysisUsage(AnalysisUsage &AU) const;
 // End Region: Implementation Control-flow Analysis
-
 };
 
 struct DFSanFunction {
@@ -443,8 +441,6 @@ struct DFSanFunction {
   std::unordered_map<Instruction *, int> BIID;
   std::unordered_map<Instruction *, BasicBlock *> BIPreHeaders;
 // End Region: Implementation Control-flow Analysis
-
-
   struct CachedCombinedShadow {
     BasicBlock *Block;
     Value *Shadow;
@@ -456,13 +452,11 @@ struct DFSanFunction {
   DFSanFunction(DataFlowSanitizer &DFS, Function *F, bool IsNativeABI)
       : DFS(DFS), F(F), IA(DFS.getInstrumentedABI()), IsNativeABI(IsNativeABI) {
     DT.recalculate(*F);
-
 // Start Region: Implementation Control-flow Analysis
     if(ClEnableControlFlowAnalysis) {
       PDT.recalculate(*F);
     }
 // End Region: Implementation Control-flow Analysis
-
     // FIXME: Need to track down the register allocator issue which causes poor
     // performance in pathological cases with large numbers of basic blocks.
     AvoidNewBlocks = F->size() > 1000;
@@ -480,10 +474,9 @@ struct DFSanFunction {
   void storeShadow(Value *Addr, uint64_t Size, uint64_t Align, Value *Shadow,
                    Instruction *Pos);
 // Start Region: Implementation Control-flow Analysis
-  void insertControlLeave(Instruction *BI, BasicBlock *PDBlock);
   Value *taintWithScopeLabel(Instruction *Inst, Value *Shadow);
+  void insertControlLeave(Instruction *BI, BasicBlock *PDBlock);
 // End Region: Implementation Control-flow Analysis
-
 };
 
 class DFSanVisitor : public InstVisitor<DFSanVisitor> {
@@ -653,14 +646,13 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
     Type *DFSanControlReplaceArgs[1] { ShadowTy };
     DFSanControlReplaceFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlReplaceArgs, /*isVarArg=*/false);
+    DFSanControlScopeLabelFnTy =
+        FunctionType::get(ShadowTy, None, /*isVarArg=*/false);
     Type *DFSanControlLeaveArgs[1] { Integer32 };
     DFSanControlLeaveFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlLeaveArgs, /*isVarArg=*/false);
-    DFSanControlScopeLabelFnTy =
-        FunctionType::get(ShadowTy, None, /*isVarArg=*/false);
   }
 // End Region: Implementation Control-flow Analysis
-
   if (GetArgTLSPtr) {
     Type *ArgTLSTy = ArrayType::get(ShadowTy, 64);
     ArgTLS = nullptr;
@@ -884,55 +876,52 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     }
     {
       AttributeList AL;
-      AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
-      DFSanControlLeaveFn =
-          Mod->getOrInsertFunction("__dfsan_control_leave", DFSanControlLeaveFnTy);
-    }
-    {
-      AttributeList AL;
       AL = AL.addAttribute(M.getContext(), AttributeList::ReturnIndex,
                            Attribute::ZExt);
       DFSanControlScopeLabelFn =
           Mod->getOrInsertFunction("__dfsan_control_scope_label", DFSanControlScopeLabelFnTy);
+    }
+    {
+      AttributeList AL;
+      AL = AL.addParamAttribute(M.getContext(), 0, Attribute::ZExt);
+      DFSanControlLeaveFn =
+          Mod->getOrInsertFunction("__dfsan_control_leave", DFSanControlLeaveFnTy);
     }
     legacy::PassManager *PM = new legacy::PassManager();
     PM->add(createLoopSimplifyPass());
     PM->run(M);
   }
 // End Region: Implementation Control-flow Analysis
-
   std::vector<Function *> FnsToInstrument;
   SmallPtrSet<Function *, 2> FnsWithNativeABI;
   for (Function &i : M) {
 // Start Region: Implementation Control-flow Analysis
     if(ClEnableControlFlowAnalysis) {
       if (!i.isIntrinsic() &&
-          &i != DFSanUnionFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanCheckedUnionFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanUnionLoadFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanUnimplementedFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanSetLabelFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanNonzeroLabelFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanVarargWrapperFn.getCallee()->stripPointerCasts() &&
-          
-          &i != DFSanControlEnterFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanControlReplaceFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanControlLeaveFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanControlScopeLabelFn.getCallee()->stripPointerCasts())
-        FnsToInstrument.push_back(&i);
+        &i != DFSanUnionFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanCheckedUnionFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanUnionLoadFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanUnimplementedFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanSetLabelFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanNonzeroLabelFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanVarargWrapperFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanControlEnterFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanControlReplaceFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanControlScopeLabelFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanControlLeaveFn.getCallee()->stripPointerCasts())
+      FnsToInstrument.push_back(&i);
     }
 // End Region: Implementation Control-flow Analysis
-    else
-    {
+    else {
       if (!i.isIntrinsic() &&
-          &i != DFSanUnionFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanCheckedUnionFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanUnionLoadFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanUnimplementedFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanSetLabelFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanNonzeroLabelFn.getCallee()->stripPointerCasts() &&
-          &i != DFSanVarargWrapperFn.getCallee()->stripPointerCasts())
-        FnsToInstrument.push_back(&i);
+        &i != DFSanUnionFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanCheckedUnionFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanUnionLoadFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanUnimplementedFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanSetLabelFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanNonzeroLabelFn.getCallee()->stripPointerCasts() &&
+        &i != DFSanVarargWrapperFn.getCallee()->stripPointerCasts())
+      FnsToInstrument.push_back(&i);
     }
   }
 
@@ -1057,8 +1046,8 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         i = FnsToInstrument.begin() + N;
         e = FnsToInstrument.begin() + Count;
       }
-      // Hopefully, nobody will try to indirectly call a vararg
-      // function... yet.
+               // Hopefully, nobody will try to indirectly call a vararg
+               // function... yet.
     } else if (FT->isVarArg()) {
       UnwrappedFnMap[&F] = &F;
       *i = nullptr;
@@ -1124,9 +1113,8 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         // DFSanVisitor may delete Inst, so keep track of whether it was a
         // terminator.
         bool IsTerminator = Inst->isTerminator();
-        if (!DFSF.SkipInsts.count(Inst)) {
+        if (!DFSF.SkipInsts.count(Inst))
           DFSanVisitor(DFSF).visit(Inst);
-        }
         if (IsTerminator)
           break;
         Inst = Next;
@@ -1452,7 +1440,6 @@ Value *DFSanFunction::loadShadow(Value *Addr, uint64_t Size, uint64_t Align,
          Ofs += 64 / DFS.ShadowWidth) {
       BasicBlock *NextBB = BasicBlock::Create(*DFS.Ctx, "", F);
       DT.addNewBlock(NextBB, LastBr->getParent());
-
       IRBuilder<> NextIRB(NextBB);
       WideAddr = NextIRB.CreateGEP(Type::getInt64Ty(*DFS.Ctx), WideAddr,
                                    ConstantInt::get(DFS.IntptrTy, 1));
@@ -1574,16 +1561,13 @@ void DFSanVisitor::visitStoreInst(StoreInst &SI) {
   }
 
   Value* Shadow = DFSF.getShadow(SI.getValueOperand());
-
   if (ClCombinePointerLabelsOnStore) {
     Value *PtrShadow = DFSF.getShadow(SI.getPointerOperand());
     Shadow = DFSF.combineShadows(Shadow, PtrShadow, &SI);
   }
-
 // Start Region: Implementation Control-flow Analysis
   Shadow = DFSF.taintWithScopeLabel(&SI,Shadow);
 // End Region: Implementation Control-flow Analysis
-
   DFSF.storeShadow(SI.getPointerOperand(), Size, Align, Shadow, &SI);
 }
 
@@ -1993,6 +1977,7 @@ void DFSanFunction::insertControlLeave(Instruction *BI, BasicBlock *PDBlock) {
   IRBLeave.CreateCall(DFS.DFSanControlLeaveFn, { ConstantInt::get(DFS.Integer32, (uint64_t) BIID.find(BI)->second) });
 }
 
+// Function call which unifies the taint of an existing value with the scope label.
 Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow) {
   if(ClEnableControlFlowAnalysis){
     bool Taint = false;

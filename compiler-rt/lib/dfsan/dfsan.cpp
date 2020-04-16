@@ -18,7 +18,6 @@
 // prefixed __dfsan_.
 //===----------------------------------------------------------------------===//
 
-#include <stdio.h>
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_file.h"
@@ -163,20 +162,14 @@ static void dfsan_check_label(dfsan_label label) {
 // this function (the instrumentation pass inlines the equality test).
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
-  //printf("START __dfsan_union\n");
-  //printf("l1 is %d, l2 is %d\n", l1, l2);
   if (flags().fast16labels)
     return l1 | l2;
   DCHECK_NE(l1, l2);
 
-  if (l1 == 0) {
-    //printf("END __dfsan_union\n\n");
+  if (l1 == 0)
     return l2;
-  }
-  if (l2 == 0) {
-    //printf("END __dfsan_union\n\n");
+  if (l2 == 0)
     return l1;
-  }
 
   if (l1 > l2)
     Swap(l1, l2);
@@ -211,8 +204,6 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
       label = atomic_load(table_ent, memory_order_acquire);
     } while (label == kInitializingLabel);
   }
-  //printf("unified is %d\n", label);
-  //printf("END __dfsan_union\n\n");
   return label;
 }
 
@@ -468,7 +459,6 @@ __attribute__((section(".preinit_array"), used))
 static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 #endif
 
-
 // Start Region: Implementation Control-flow Analysis
 
 // Explicit control flow taint analysis is implemented here.
@@ -486,19 +476,6 @@ static thread_local dfsan_label *__dfsan_control_labels = NULL;
 static thread_local int *__dfsan_control_switches = NULL;
 // Starting depth for control structures.
 static thread_local int __dfsan_control_depth = 0;
-
-// Called when we need the label of the current control structure.
-extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-__dfsan_control_scope_label (void) {
-  if(__dfsan_control_depth < 1){
-    return 0;
-  }
-  return __dfsan_control_labels[__dfsan_control_depth-1];
-}
-extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-dfsan_control_scope_label (void) {
-  return __dfsan_control_scope_label();
-}
 
 // Called when entering a control structure such as for, if, while, etc.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -551,6 +528,19 @@ __dfsan_control_replace (dfsan_label label) {
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_replace (dfsan_label label) {
   return __dfsan_control_replace(label);
+}
+
+// Called when we need the label of the current control structure.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
+__dfsan_control_scope_label (void) {
+  if(__dfsan_control_depth < 1){
+    return 0;
+  }
+  return __dfsan_control_labels[__dfsan_control_depth-1];
+}
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
+dfsan_control_scope_label (void) {
+  return __dfsan_control_scope_label();
 }
 
 // Called when we leave a control structure.
