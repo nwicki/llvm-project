@@ -1988,8 +1988,13 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int 
     while(!Taint && It != BIPD.end()) {
       BasicBlock *BB = It->second;
       Instruction *PDInst = BB->getFirstNonPHI();
-      if(DT.dominates(It->first,Inst) && PDT.dominates(PDInst, Inst)) {
-        Taint = true;
+      Instruction *BI = It->first;
+      Taint = Taint || (DT.dominates(BI,Inst) && PDT.dominates(PDInst, Inst));
+
+      auto PreHeader = BIPreHeaders.find(BI);
+      if(PreHeader != BIPreHeaders.end()) {
+        Instruction* Terminator = PreHeader->second->getTerminator();
+        Taint = Taint || (DT.dominates(Terminator,Inst) && PDT.dominates(PDInst, Inst));
       }
       It++;
     }

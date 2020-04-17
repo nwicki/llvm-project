@@ -464,6 +464,7 @@ static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 // Explicit control flow taint analysis is implemented here.
 // We taint any operand inside the scope of the control structure with
 // the taint incorporated by the condition to enter the control structure.
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -548,12 +549,14 @@ __dfsan_control_scope_label (int unified) {
   if(__dfsan_control_depth < 1){
     return 0;
   }
+  dfsan_label scope_label;
   if(unified) {
-    return __dfsan_control_unified_labels[__dfsan_control_depth-1];
+    scope_label = __dfsan_control_unified_labels[__dfsan_control_depth-1];
   }
   else {
-    return __dfsan_control_split_labels[__dfsan_control_depth-1];
+    scope_label = __dfsan_control_split_labels[__dfsan_control_depth-1];
   }
+  return scope_label;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 dfsan_control_scope_label (int unified) {
@@ -592,9 +595,5 @@ dfsan_control_leave (void) {
 // clang++ lulesh_complete_opt.o -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build_libcxx/lib -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent/include -I/usr/lib/x86_64-linux-gnu/openmpi/include -pthread -L/usr//lib -L/usr/lib/x86_64-linux-gnu/openmpi/lib -lmpi_cxx -lmpi -Wl,--start-group,-lc++abi
 // DFSAN_OPTIONS=warn_unimplemented=0 mpirun -n 1 ./a.out -s 2 > OUT 2>&1
 // perf-taint
-// clang++ control_flow_test.cpp -emit-llvm -S &&
-// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt control_flow_test.ll -o control_flow_test_opt.ll -S &&
-// llc -relocation-model=pic -filetype=obj control_flow_test_opt.ll &&
-// clang++ -fsanitize=dataflow control_flow_test_opt.o &&
-// ./a.out -v
+// clang++ -Xclang -disable-O0-optnone control_flow_test.cpp -emit-llvm -S && opt -mem2reg control_flow_test.ll -o control_flow_test_mem2reg.ll -S && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt control_flow_test_mem2reg.ll -o control_flow_test_opt.ll -S && llc -relocation-model=pic -filetype=obj control_flow_test_opt.ll && clang++ -fsanitize=dataflow control_flow_test_opt.o && ./a.out -v
 // End Region: Implementation Control-flow Analysis
