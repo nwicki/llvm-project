@@ -158,6 +158,34 @@ static void dfsan_check_label(dfsan_label label) {
   }
 }
 
+static bool dfsan_contains(dfsan_label l1, dfsan_label l2)
+{
+  struct dfsan_label_info l2_info = __dfsan_label_info[l2];
+  dfsan_label l2_l1 = __dfsan_label_info[l2].l1;
+  dfsan_label l2_l2 = __dfsan_label_info[l2].l2;
+  if (l2_l1 == l1 || l2_l2 == l1)
+    return true;
+  if(l2_l1) {
+    if (l1 > l2_l1) {
+      if(dfsan_contains(l2_l1, l1))
+        return true;
+    } else {
+      if(dfsan_contains(l1, l2_l1))
+        return true;
+    }
+  }
+  if(l2_l2) {
+    if (l1 > l2_l2) {
+      if(dfsan_contains(l2_l2, l1))
+        return true;
+    } else {
+      if(dfsan_contains(l1, l2_l2))
+        return true;
+    }
+  }
+  return false;
+}
+
 // Resolves the union of two unequal labels.  Nonequality is a precondition for
 // this function (the instrumentation pass inlines the equality test).
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
@@ -186,8 +214,7 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
     // subsumes l2 because we are guaranteed here that l1 < l2, and (at least
     // in the cases we are interested in) a label may only subsume labels
     // created earlier (i.e. with a lower numerical value).
-    if (__dfsan_label_info[l2].l1 == l1 ||
-        __dfsan_label_info[l2].l2 == l1) {
+    if (dfsan_contains(l1, l2)) {                                                                                                                                                                                                                                                                                         
       label = l2;
     } else {
       label =
