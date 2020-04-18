@@ -554,7 +554,14 @@ dfsan_control_enter (dfsan_label label) {
 
 // Called after computing the condition for a loop structure to replace the current taint label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_replace (dfsan_label label) {
+__dfsan_control_replace (dfsan_label label, int bi_id) {
+  if(__dfsan_control_switches[__dfsan_control_depth-1] != bi_id) {
+    return;
+  }
+  if(__dfsan_control_depth < 1) {
+    Report("FATAL: ControlFlowSanitizer: Trying to replace label in non-existent scope.\n");
+    return;
+  }
   if(__dfsan_control_depth == 1){
     __dfsan_control_split_labels[__dfsan_control_depth-1] = label;
     __dfsan_control_unified_labels[__dfsan_control_depth-1] = label;
@@ -567,13 +574,17 @@ __dfsan_control_replace (dfsan_label label) {
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_replace (dfsan_label label) {
-  return __dfsan_control_replace(label);
+  return __dfsan_control_replace(label, 1);
 }
 
 // Called when we need the label of the current control structure. If true we return the unified label, otherwise we return the split label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-__dfsan_control_scope_label (int unified) {
+__dfsan_control_scope_label (int unified, int bi_id) {
   if(__dfsan_control_depth < 1){
+    Report("FATAL: ControlFlowSanitizer: Trying to get scope label in non-existent scope.\n");
+    return 0;
+  }
+  if(__dfsan_control_switches[__dfsan_control_depth-1] != bi_id) {
     return 0;
   }
   dfsan_label scope_label;
@@ -587,13 +598,14 @@ __dfsan_control_scope_label (int unified) {
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 dfsan_control_scope_label (int unified) {
-  return __dfsan_control_scope_label(unified);
+  return __dfsan_control_scope_label(unified, 1);
 }
 
 // Called when we leave a control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_leave (int bi_id) {
   if(__dfsan_control_depth < 1) {
+    Report("FATAL: ControlFlowSanitizer: Trying to leave non-existent scope.\n");
     return;
   }
   if(__dfsan_control_switches[__dfsan_control_depth-1] != bi_id) {

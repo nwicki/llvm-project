@@ -643,12 +643,12 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
     Type *DFSanControlEnterArgs[2] { ShadowTy, Integer32 };
     DFSanControlEnterFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlEnterArgs, /*isVarArg=*/false);
-    Type *DFSanControlReplaceArgs[1] { ShadowTy };
+    Type *DFSanControlReplaceArgs[2] { ShadowTy, Integer32 };
     DFSanControlReplaceFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlReplaceArgs, /*isVarArg=*/false);
-    Type *DFSanControlLabelArgs[1] { Integer32 };
+    Type *DFSanControlScopeLabelArgs[2] { Integer32, Integer32 };
     DFSanControlScopeLabelFnTy =
-        FunctionType::get(ShadowTy, DFSanControlLabelArgs, /*isVarArg=*/false);
+        FunctionType::get(ShadowTy, DFSanControlScopeLabelArgs, /*isVarArg=*/false);
     Type *DFSanControlLeaveArgs[1] { Integer32 };
     DFSanControlLeaveFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlLeaveArgs, /*isVarArg=*/false);
@@ -1961,12 +1961,13 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
     if(BI.isConditional() && DFSF.BIPD.count(&BI)) {
         Value *CondShadow = DFSF.getShadow(BI.getCondition());
         IRBuilder<> IRB(&BI);
+        ConstantInt* BiId = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) DFSF.BIID.find(&BI)->second);
       if(!DFSF.BIPreHeaders.count(&BI)) {
-        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow, ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) DFSF.BIID.find(&BI)->second) });
+        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow, BiId });
         DFSF.insertControlLeave(&BI, DFSF.BIPD.find(&BI)->second);
       }
       else if(DFSF.BIPreHeaders.count(&BI)) {
-        IRB.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow });
+        IRB.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow, BiId });
       }
     }
   }
@@ -1983,31 +1984,70 @@ void DFSanFunction::insertControlLeave(Instruction *BI, BasicBlock *PDBlock) {
 Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int unified) {
   if(ClEnableControlFlowAnalysis){
     bool Taint = false;
+    std::list<Instruction*> Taint_BI; 
     std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
     // We check whether the instruction to be tainted is inside the scope of a branch.
-    while(!Taint && It != BIPD.end()) {
+    while(It != BIPD.end()) {
       BasicBlock *BB = It->second;
       Instruction *PDInst = BB->getFirstNonPHI();
       Instruction *BI = It->first;
-      Taint = Taint || (DT.dominates(BI,Inst) && PDT.dominates(PDInst, Inst));
+      if(DT.dominates(BI,Inst) && PDT.dominates(PDInst, Inst)) {
+        Taint = true;
+        Taint_BI.push_back(BI);
+      }
 
+      // In the case of loops combined with PHI nodes the instruction might not be dominated
+      // by the branch instruction, but will be by the preheader block of the loop.
       auto PreHeader = BIPreHeaders.find(BI);
       if(PreHeader != BIPreHeaders.end()) {
         Instruction* Terminator = PreHeader->second->getTerminator();
-        Taint = Taint || (DT.dominates(Terminator,Inst) && PDT.dominates(PDInst, Inst));
+        if(DT.dominates(Terminator,Inst) && PDT.dominates(PDInst, Inst)) {
+          Taint = true;
+          Taint_BI.push_back(BI);
+        }
       }
       It++;
     }
 
     // If the instruction is no in a branch scope, we do not need to taint it.
     if(Taint) {
+      
+      Instruction* Current_BI = nullptr;
+
+      if(Taint_BI.size() == 1) {
+        Current_BI = Taint_BI.front();
+      }
+      // Get the BI which is the closest preceding to this scope label call.
+      std::list<Instruction*>::iterator ItBI1 = Taint_BI.begin();
+      std::list<Instruction*>::iterator ItBI2 = Taint_BI.begin();
+
+      while(!Current_BI && ItBI1 != Taint_BI.end()) {
+        bool NotDominating = true;
+        while(NotDominating && ItBI2 != Taint_BI.end()) {
+          if(DT.dominates(*ItBI1,*ItBI2)) {
+            NotDominating = false;
+          }
+          ItBI2++;
+        }
+        if(NotDominating) {
+          Current_BI = *ItBI1;
+        }     
+          ItBI1++;
+      }
+
+      if(!Current_BI) {
+        std::cerr << "FATAL: No non dominating branch instruction found.\n";
+        exit(1);
+      }
+
+      // Ignore PHI instructions for insertion.
       Instruction *Pos = Inst;
       if(isa<PHINode>(Inst)) {
         Pos = Inst->getParent()->getFirstNonPHI();
       }
 
       IRBuilder<> IRB(Pos);
-      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, {ConstantInt::get(DFS.Integer32, (uint64_t) unified)});
+      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, { ConstantInt::get(DFS.Integer32, (uint64_t) unified), ConstantInt::get(DFS.Integer32, (uint64_t) BIID.find(Current_BI)->second) });
       
       // Code from combineShadows
       auto Key = std::make_pair(Shadow, ScopeLabel);
