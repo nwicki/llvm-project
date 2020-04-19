@@ -1095,6 +1095,9 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
                     DFSF.insertControlLeave(BI, IPDom);
                   }
                 }
+                else {
+                  DFSF.insertControlLeave(BI, IPDom);
+                }
               }
             }
           }
@@ -1962,12 +1965,11 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
         Value *CondShadow = DFSF.getShadow(BI.getCondition());
         IRBuilder<> IRB(&BI);
         ConstantInt* BiId = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) DFSF.BIID.find(&BI)->second);
-      if(!DFSF.BIPreHeaders.count(&BI)) {
-        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow, BiId });
-        DFSF.insertControlLeave(&BI, DFSF.BIPD.find(&BI)->second);
-      }
-      else if(DFSF.BIPreHeaders.count(&BI)) {
+      if(DFSF.BIPreHeaders.count(&BI)) {
         IRB.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow, BiId });
+      }
+      else {
+        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow, BiId });
       }
     }
   }
