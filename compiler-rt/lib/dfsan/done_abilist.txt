@@ -36,8 +36,6 @@ fun:dfsan_control_enter=uninstrumented
 fun:dfsan_control_enter=discard
 fun:dfsan_control_replace=uninstrumented
 fun:dfsan_control_replace=discard
-fun:dfsan_control_leave=uninstrumented
-fun:dfsan_control_leave=discard
 fun:dfsan_control_scope_label=uninstrumented
 fun:dfsan_control_scope_label=discard
 

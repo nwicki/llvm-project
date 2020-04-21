@@ -160,7 +160,6 @@ static void dfsan_check_label(dfsan_label label) {
 
 static bool dfsan_contains(dfsan_label l1, dfsan_label l2)
 {
-  struct dfsan_label_info l2_info = __dfsan_label_info[l2];
   dfsan_label l2_l1 = __dfsan_label_info[l2].l1;
   dfsan_label l2_l2 = __dfsan_label_info[l2].l2;
   if (l2_l1 == l1 || l2_l2 == l1)
@@ -496,128 +495,76 @@ static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 #include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
-// Size of the data structure for control labels.
-static thread_local int __dfsan_control_array_size = 16;
-// Data Structure to save the current value of the split control structure label.
-static thread_local dfsan_label *__dfsan_control_split_labels = NULL;
-// Data Structure to save the current value of the unified control structure label.
+// Size of the data structure for control labels and switches.
+static thread_local int __dfsan_control_array_size = 32;
+// Data Structure to save the current value of the unified control label.
 static thread_local dfsan_label *__dfsan_control_unified_labels = NULL;
-// Data Structure to save in which level we already entered or leaved. No leave without enter.
-static thread_local int *__dfsan_control_switches = NULL;
-// Starting depth for control structures.
-static thread_local int __dfsan_control_depth = 0;
 
 // Called when entering a control structure such as for, if, while, etc.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_enter (dfsan_label label, int bi_id) {
-  if(!__dfsan_control_split_labels) {
-    __dfsan_control_split_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
+__dfsan_control_enter (dfsan_label label, int bi_id, int preceding_bi_id) {
+  if(!__dfsan_control_unified_labels) {
     __dfsan_control_unified_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
-    __dfsan_control_switches = (int *) calloc(__dfsan_control_array_size,sizeof(int));
   }
 
-  if(__dfsan_control_depth < 1){
-    __dfsan_control_split_labels[__dfsan_control_depth] = label;
-    __dfsan_control_unified_labels[__dfsan_control_depth] = label;
-  }
-  else {
-    __dfsan_control_split_labels[__dfsan_control_depth] = label;
-    __dfsan_control_unified_labels[__dfsan_control_depth] = dfsan_union(__dfsan_control_unified_labels[__dfsan_control_depth-1],label);
-  }
-  __dfsan_control_switches[__dfsan_control_depth] = bi_id;
-  __dfsan_control_depth++;
+  int id = bi_id > preceding_bi_id ? bi_id : preceding_bi_id;
 
-  if(__dfsan_control_depth >= __dfsan_control_array_size) {
-    dfsan_label *new_array_split_labels = (dfsan_label *) malloc(__dfsan_control_array_size*2*sizeof(dfsan_label));
-    memcpy(new_array_split_labels, __dfsan_control_split_labels, __dfsan_control_array_size*sizeof(dfsan_label));
-    free(__dfsan_control_split_labels);
-    __dfsan_control_split_labels = new_array_split_labels;
-    
-    dfsan_label *new_array_unified_labels = (dfsan_label *) malloc(__dfsan_control_array_size*2*sizeof(dfsan_label));
+  if(id >= __dfsan_control_array_size) {
+    int new_array_size = __dfsan_control_array_size;
+    while(id >= new_array_size) {
+      new_array_size *= 2;
+    }
+
+    dfsan_label *new_array_unified_labels = (dfsan_label *) malloc(new_array_size*sizeof(dfsan_label));
     memcpy(new_array_unified_labels, __dfsan_control_unified_labels, __dfsan_control_array_size*sizeof(dfsan_label));
     free(__dfsan_control_unified_labels);
     __dfsan_control_unified_labels = new_array_unified_labels;
+  }
 
-    int *new_array_switches = (int *) calloc(__dfsan_control_array_size*2,sizeof(int));
-    memcpy(new_array_switches, __dfsan_control_switches, __dfsan_control_array_size*sizeof(int));
-    free(__dfsan_control_switches);
-    __dfsan_control_switches = new_array_switches;
-
-    __dfsan_control_array_size *= 2;
+  if(preceding_bi_id == -1){
+    __dfsan_control_unified_labels[bi_id] = label;
+  }
+  else {
+    __dfsan_control_unified_labels[bi_id] = dfsan_union(__dfsan_control_unified_labels[preceding_bi_id],label);
   }
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_enter (dfsan_label label) {
-  return __dfsan_control_enter(label, 1);
+  return __dfsan_control_enter(label, 1, 0);
 }
 
 // Called after computing the condition for a loop structure to replace the current taint label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_replace (dfsan_label label, int bi_id) {
-  if(__dfsan_control_switches[__dfsan_control_depth-1] != bi_id) {
+__dfsan_control_replace (dfsan_label label, int bi_id, int preceding_bi_id) {
+  if((bi_id > preceding_bi_id ? bi_id : preceding_bi_id) >= __dfsan_control_array_size) {
+    Report("FATAL: ControlFlowSanitizer: Replace function call to a non-set id.");
     return;
   }
-  if(__dfsan_control_depth < 1) {
-    Report("FATAL: ControlFlowSanitizer: Trying to replace label in non-existent scope.\n");
-    return;
+  if(preceding_bi_id == -1) {
+    __dfsan_control_unified_labels[bi_id] = label;
   }
-  if(__dfsan_control_depth == 1){
-    __dfsan_control_split_labels[__dfsan_control_depth-1] = label;
-    __dfsan_control_unified_labels[__dfsan_control_depth-1] = label;
+  else {
+    __dfsan_control_unified_labels[bi_id] = dfsan_union(__dfsan_control_unified_labels[preceding_bi_id],label);
   }
-  else if(__dfsan_control_depth > 1) {
-    __dfsan_control_split_labels[__dfsan_control_depth-1] = label;
-    __dfsan_control_unified_labels[__dfsan_control_depth-1] = dfsan_union(__dfsan_control_unified_labels[__dfsan_control_depth-2],label);
-  }
-  return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_replace (dfsan_label label) {
-  return __dfsan_control_replace(label, 1);
+  return __dfsan_control_replace(label, 1, 0);
 }
 
 // Called when we need the label of the current control structure. If true we return the unified label, otherwise we return the split label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-__dfsan_control_scope_label (int unified, int bi_id) {
-  if(__dfsan_control_depth < 1){
-    Report("FATAL: ControlFlowSanitizer: Trying to get scope label in non-existent scope.\n");
+__dfsan_control_scope_label (int bi_id) {
+  if(bi_id >= __dfsan_control_array_size) {
+    Report("FATAL: ControlFlowSanitizer: Scope label function call to a non-set id.");
     return 0;
   }
-  if(__dfsan_control_switches[__dfsan_control_depth-1] != bi_id) {
-    return 0;
-  }
-  dfsan_label scope_label;
-  if(unified) {
-    scope_label = __dfsan_control_unified_labels[__dfsan_control_depth-1];
-  }
-  else {
-    scope_label = __dfsan_control_split_labels[__dfsan_control_depth-1];
-  }
-  return scope_label;
+  return __dfsan_control_unified_labels[bi_id];
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-dfsan_control_scope_label (int unified) {
-  return __dfsan_control_scope_label(unified, 1);
-}
-
-// Called when we leave a control structure.
-extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_leave (int bi_id) {
-  if(__dfsan_control_depth < 1) {
-    Report("FATAL: ControlFlowSanitizer: Trying to leave non-existent scope.\n");
-    return;
-  }
-  if(__dfsan_control_switches[__dfsan_control_depth-1] != bi_id) {
-    return;
-  }
-  __dfsan_control_depth--;
-  __dfsan_control_switches[__dfsan_control_depth] = 0;
-  return;
-}
-extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-dfsan_control_leave (void) {
-  return __dfsan_control_leave(1);
+dfsan_control_scope_label (int bi_id) {
+  return __dfsan_control_scope_label(bi_id);
 }
 
 // export PATH=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build/bin/:$PATH
