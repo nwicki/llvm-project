@@ -498,6 +498,8 @@ static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 // Size of the data structure for control labels and switches.
 static thread_local int __dfsan_control_array_size = 32;
 // Data Structure to save the current value of the unified control label.
+static thread_local dfsan_label *__dfsan_control_split_labels = NULL;
+// Data Structure to save the current value of the unified control label.
 static thread_local dfsan_label *__dfsan_control_unified_labels = NULL;
 
 // Called when entering a control structure such as for, if, while, etc.
@@ -505,6 +507,7 @@ extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_enter (dfsan_label label, int bi_id, int preceding_bi_id) {
   if(!__dfsan_control_unified_labels) {
     __dfsan_control_unified_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
+    __dfsan_control_split_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
   }
 
   int id = bi_id > preceding_bi_id ? bi_id : preceding_bi_id;
@@ -515,12 +518,18 @@ __dfsan_control_enter (dfsan_label label, int bi_id, int preceding_bi_id) {
       new_array_size *= 2;
     }
 
+    dfsan_label *new_array_split_labels = (dfsan_label *) malloc(new_array_size*sizeof(dfsan_label));
+    memcpy(new_array_split_labels, __dfsan_control_split_labels, __dfsan_control_array_size*sizeof(dfsan_label));
+    free(__dfsan_control_split_labels);
+    __dfsan_control_split_labels = new_array_split_labels;
+
     dfsan_label *new_array_unified_labels = (dfsan_label *) malloc(new_array_size*sizeof(dfsan_label));
     memcpy(new_array_unified_labels, __dfsan_control_unified_labels, __dfsan_control_array_size*sizeof(dfsan_label));
     free(__dfsan_control_unified_labels);
     __dfsan_control_unified_labels = new_array_unified_labels;
   }
 
+  __dfsan_control_split_labels[bi_id] = label;
   if(preceding_bi_id == -1){
     __dfsan_control_unified_labels[bi_id] = label;
   }
@@ -541,6 +550,7 @@ __dfsan_control_replace (dfsan_label label, int bi_id, int preceding_bi_id) {
     Report("FATAL: ControlFlowSanitizer: Replace function call to a non-set id.");
     return;
   }
+  __dfsan_control_split_labels[bi_id] = label;
   if(preceding_bi_id == -1) {
     __dfsan_control_unified_labels[bi_id] = label;
   }
@@ -555,16 +565,19 @@ dfsan_control_replace (dfsan_label label) {
 
 // Called when we need the label of the current control structure. If true we return the unified label, otherwise we return the split label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-__dfsan_control_scope_label (int bi_id) {
+__dfsan_control_scope_label (int bi_id, int unified) {
   if(bi_id >= __dfsan_control_array_size) {
     Report("FATAL: ControlFlowSanitizer: Scope label function call to a non-set id.");
     return 0;
   }
-  return __dfsan_control_unified_labels[bi_id];
+  if(unified) {
+    return __dfsan_control_unified_labels[bi_id];
+  }
+  return __dfsan_control_split_labels[bi_id];
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-dfsan_control_scope_label (int bi_id) {
-  return __dfsan_control_scope_label(bi_id);
+dfsan_control_scope_label (int bi_id, int unified) {
+  return __dfsan_control_scope_label(bi_id, unified);
 }
 
 // export PATH=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build/bin/:$PATH
@@ -581,5 +594,5 @@ dfsan_control_scope_label (int bi_id) {
 // clang++ lulesh_complete_opt.o -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build_libcxx/lib -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent/include -I/usr/lib/x86_64-linux-gnu/openmpi/include -pthread -L/usr//lib -L/usr/lib/x86_64-linux-gnu/openmpi/lib -lmpi_cxx -lmpi -Wl,--start-group,-lc++abi
 // DFSAN_OPTIONS=warn_unimplemented=0 mpirun -n 1 ./a.out -s 2 > OUT 2>&1
 // perf-taint
-// clang++ -Xclang -disable-O0-optnone control_flow_test.cpp -emit-llvm -S && opt -mem2reg control_flow_test.ll -o control_flow_test_mem2reg.ll -S && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt control_flow_test_mem2reg.ll -o control_flow_test_opt.ll -S && llc -relocation-model=pic -filetype=obj control_flow_test_opt.ll && clang++ -fsanitize=dataflow control_flow_test_opt.o && ./a.out -v
+// opt -load /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libDfsanInstrument.so -extrap-extractor -dfsan -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -S name.ll -o name_opt.ll && llc -relocation-model=pic -filetype=obj name_opt.ll && clang++ -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build_libcxx/lib -Wl,--start-group,-lc++abi /usr/lib/x86_64-linux-gnu/openmpi/lib/libmpi.so /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libdfsan_runtime.a name_opt.o && DFSAN_OPTIONS=warn_unimplemented=0 mpiexec -n 2 a.out
 // End Region: Implementation Control-flow Analysis

@@ -114,7 +114,7 @@ void dfsan_control_enter (dfsan_label label);
 // Replaces the control scope label with an updated loop label
 void dfsan_control_replace (dfsan_label label);
 // Returns the label of the scope with the specific bi_id
-dfsan_label dfsan_control_scope_label (int bi_id);
+dfsan_label dfsan_control_scope_label (int bi_id, int unified);
 // End Region: Implementation Control-flow Analysis
 #ifdef __cplusplus
 }  // extern "C"
