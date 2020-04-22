@@ -502,16 +502,9 @@ static thread_local dfsan_label *__dfsan_control_split_labels = NULL;
 // Data Structure to save the current value of the unified control label.
 static thread_local dfsan_label *__dfsan_control_unified_labels = NULL;
 
-// Called when entering a control structure such as for, if, while, etc.
+// Increases array size to fit id
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_enter (dfsan_label label, int bi_id, int preceding_bi_id) {
-  if(!__dfsan_control_unified_labels) {
-    __dfsan_control_unified_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
-    __dfsan_control_split_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
-  }
-
-  int id = bi_id > preceding_bi_id ? bi_id : preceding_bi_id;
-
+__dfsan_control_increase_array_size(int id) {
   if(id >= __dfsan_control_array_size) {
     int new_array_size = __dfsan_control_array_size;
     while(id >= new_array_size) {
@@ -528,7 +521,18 @@ __dfsan_control_enter (dfsan_label label, int bi_id, int preceding_bi_id) {
     free(__dfsan_control_unified_labels);
     __dfsan_control_unified_labels = new_array_unified_labels;
   }
+  return;
+}
 
+// Called when entering a control structure such as for, if, while, etc.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
+__dfsan_control_enter (dfsan_label label, int bi_id, int preceding_bi_id) {
+  if(!__dfsan_control_unified_labels) {
+    __dfsan_control_unified_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
+    __dfsan_control_split_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
+  }
+
+  __dfsan_control_increase_array_size(bi_id > preceding_bi_id ? bi_id : preceding_bi_id);
   __dfsan_control_split_labels[bi_id] = label;
   if(preceding_bi_id == -1){
     __dfsan_control_unified_labels[bi_id] = label;
@@ -546,10 +550,7 @@ dfsan_control_enter (dfsan_label label) {
 // Called after computing the condition for a loop structure to replace the current taint label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_replace (dfsan_label label, int bi_id, int preceding_bi_id) {
-  if((bi_id > preceding_bi_id ? bi_id : preceding_bi_id) >= __dfsan_control_array_size) {
-    Report("FATAL: ControlFlowSanitizer: Replace function call to a non-set id.");
-    return;
-  }
+  __dfsan_control_increase_array_size(bi_id > preceding_bi_id ? bi_id : preceding_bi_id);
   __dfsan_control_split_labels[bi_id] = label;
   if(preceding_bi_id == -1) {
     __dfsan_control_unified_labels[bi_id] = label;
@@ -567,7 +568,6 @@ dfsan_control_replace (dfsan_label label) {
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 __dfsan_control_scope_label (int bi_id, int unified) {
   if(bi_id >= __dfsan_control_array_size) {
-    Report("FATAL: ControlFlowSanitizer: Scope label function call to a non-set id.");
     return 0;
   }
   if(unified) {

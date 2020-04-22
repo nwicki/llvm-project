@@ -2011,15 +2011,13 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int 
             Current_BI = BIHeaders.find(Parent)->second;
           }
           else {
-            std::cerr << "No preceding branch instruction found for PHINode." << std::endl;
-            exit(42);
+            return Shadow;
           }
         }
       }
 
       if(!Current_BI) {
-        std::cerr << "No preceding branch instruction found for non PHINode." << std::endl;
-        exit(42);
+        return Shadow;
       }
       IRBuilder<> IRB(Pos);
       Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, { ConstantInt::get(DFS.Integer32, (uint64_t) BIIDs.find(Current_BI)->second), ConstantInt::get(DFS.Integer32, (uint64_t) unified) });
