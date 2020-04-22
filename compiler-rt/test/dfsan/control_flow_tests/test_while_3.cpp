@@ -35,10 +35,15 @@ int main(int argc, char** argv)
 		}
 		i++;
 	}
-	assert(dfsan_has_label(a_label,dfsan_get_label(sum_a)));
-	assert(dfsan_has_label(dfsan_get_label(sum_b),dfsan_union(a_label,b_label)));
-	assert(dfsan_has_label(dfsan_get_label(sum_c),dfsan_union(a_label,c_label)));
-	assert(!dfsan_has_label(dfsan_get_label(sum_b),dfsan_get_label(c_label)));
-	assert(!dfsan_has_label(dfsan_get_label(sum_c),dfsan_get_label(b_label)));
+	dfsan_label sum_a_label = dfsan_get_label(sum_a);
+	dfsan_label sum_b_label = dfsan_get_label(sum_b);
+	dfsan_label sum_c_label = dfsan_get_label(sum_c);
+	assert(dfsan_has_label(sum_a_label,a_label));
+	assert(dfsan_has_label(sum_b_label,a_label));
+	assert(dfsan_has_label(sum_c_label,a_label));
+	assert(dfsan_has_label(sum_b_label,b_label));
+	assert(dfsan_has_label(sum_c_label,c_label));
+	assert(!dfsan_has_label(sum_b_label,c_label));
+	assert(!dfsan_has_label(sum_c_label,b_label));
 	return 0;
 }

@@ -113,9 +113,7 @@ void dfsan_weak_hook_strncmp(void *caller_pc, const char *s1, const char *s2,
 void dfsan_control_enter (dfsan_label label);
 // Replaces the control scope label with an updated loop label
 void dfsan_control_replace (dfsan_label label);
-// Reduces the depth of control flow tainting
-void dfsan_control_leave (void);
-// Returns the label of the current scope
+// Returns the label of the scope either unified or split
 dfsan_label dfsan_control_scope_label (int unified);
 // End Region: Implementation Control-flow Analysis
 #ifdef __cplusplus

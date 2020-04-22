@@ -438,7 +438,9 @@ struct DFSanFunction {
 // Start Region: Implementation Control-flow Analysis
   PostDominatorTree PDT;
   std::unordered_map<Instruction *, BasicBlock *> BIPD;
-  std::unordered_map<Instruction *, int> BIID;
+  std::unordered_map<Instruction *, int> BIIDs;
+  std::unordered_map<Instruction *, int> BINonDoms;
+  std::unordered_map<BasicBlock *, Instruction *> BIHeaders;
   std::unordered_map<Instruction *, BasicBlock *> BIPreHeaders;
 // End Region: Implementation Control-flow Analysis
   struct CachedCombinedShadow {
@@ -475,7 +477,8 @@ struct DFSanFunction {
                    Instruction *Pos);
 // Start Region: Implementation Control-flow Analysis
   Value *taintWithScopeLabel(Instruction *Inst, Value *Shadow, int unified);
-  void insertControlLeave(Instruction *BI, BasicBlock *PDBlock);
+  Instruction *getNonDominatingBI(std::list<Instruction *> NonDom_BIs);
+  int getNonDominatingBIID(Instruction *BI);
 // End Region: Implementation Control-flow Analysis
 };
 
@@ -1094,6 +1097,9 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
                     IRBPreheader.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(DFSF.DFS.ShadowTy, 0), ConstantInt::get(DFSF.DFS.Integer32,(uint64_t) (BICount)) });
                     DFSF.insertControlLeave(BI, IPDom);
                   }
+                  else {
+                    std::cerr << "Loop encountered with no PreHeader." << std::endl;
+                  }
                 }
               }
             }
@@ -1102,6 +1108,10 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
             break;
           Inst = Next;
         }
+      }
+      for(auto It = DFSF.BIPD.begin(); It != DFSF.BIPD.end(); It++) {
+        Instruction *BI = It->first;
+        DFSF.BINonDoms.insert(std::make_pair(BI,DFSF.getNonDominatingBIID(BI)));
       }
     }
 // End Region: Implementation Control-flow Analysis
@@ -1122,7 +1132,25 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         Inst = Next;
       }
     }
-
+// Start Region: Implementation Control-flow Analysis
+    for(auto It = DFSF.BIPD.begin(); It != DFSF.BIPD.end(); It++) {
+      Instruction *BI = It->first;
+      IRBuilder<> IRB(BI);
+      ConstantInt* BIID = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) DFSF.BIIDs.find(BI)->second);
+      Value *BIShadow = DFSF.BIShadows.find(BI)->second;
+      ConstantInt* NonDom_BI = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) DFSF.BINonDoms.find(BI)->second);
+      if(DFSF.BIPreHeaders.count(BI)) {
+        IRB.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { BIShadow,BIID,NonDom_BI });
+        BasicBlock *PreHeader = DFSF.BIPreHeaders.find(BI)->second;
+        Instruction *PHPos = PreHeader->getTerminator();
+        IRBuilder<> IRBPreheader(PHPos);
+        IRBPreheader.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(DFSF.DFS.ShadowTy, 0),BIID,NonDom_BI });
+      }
+      else {
+        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { BIShadow,BIID,NonDom_BI });
+      }
+    }
+// End Region: Implementation Control-flow Analysis
     // We will not necessarily be able to compute the shadow for every phi node
     // until we have visited every block.  Therefore, the code that handles phi
     // nodes adds them to the PHIFixups list so that they can be properly
@@ -1959,16 +1987,8 @@ void DFSanVisitor::visitPHINode(PHINode &PN) {
 void DFSanVisitor::visitBranchInst(BranchInst &BI) {
   if(ClEnableControlFlowAnalysis){
     if(BI.isConditional() && DFSF.BIPD.count(&BI)) {
-        Value *CondShadow = DFSF.getShadow(BI.getCondition());
-        IRBuilder<> IRB(&BI);
-        ConstantInt* BiId = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) DFSF.BIID.find(&BI)->second);
-      if(!DFSF.BIPreHeaders.count(&BI)) {
-        IRB.CreateCall(DFSF.DFS.DFSanControlEnterFn, { CondShadow, BiId });
-        DFSF.insertControlLeave(&BI, DFSF.BIPD.find(&BI)->second);
-      }
-      else if(DFSF.BIPreHeaders.count(&BI)) {
-        IRB.CreateCall(DFSF.DFS.DFSanControlReplaceFn, { CondShadow, BiId });
-      }
+      Value *CondShadow = DFSF.getShadow(BI.getCondition());
+      DFSF.BIShadows.insert(std::make_pair((Instruction*) &BI,CondShadow));
     }
   }
 }
@@ -1984,34 +2004,34 @@ void DFSanFunction::insertControlLeave(Instruction *BI, BasicBlock *PDBlock) {
 Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int unified) {
   if(ClEnableControlFlowAnalysis){
     bool Taint = false;
-    std::list<Instruction*> Taint_BI; 
     std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
+    BasicBlock *Parent = Inst->getParent();
+    bool IsPHINode = isa<PHINode>(Inst);
     // We check whether the instruction to be tainted is inside the scope of a branch.
     while(It != BIPD.end()) {
       BasicBlock *BB = It->second;
       Instruction *PDInst = BB->getFirstNonPHI();
       Instruction *BI = It->first;
-      if(DT.dominates(BI,Inst) && PDT.dominates(PDInst, Inst)) {
+      if(DT.dominates(BI,Inst) && PDT.dominates(PDInst, Inst) && PDInst != Inst) {
         Taint = true;
-        Taint_BI.push_back(BI);
       }
 
       // In the case of loops combined with PHI nodes the instruction might not be dominated
-      // by the branch instruction, but will be by the preheader block of the loop.
       auto PreHeader = BIPreHeaders.find(BI);
       if(PreHeader != BIPreHeaders.end()) {
         Instruction* Terminator = PreHeader->second->getTerminator();
-        if(DT.dominates(Terminator,Inst) && PDT.dominates(PDInst, Inst)) {
+        if(DT.dominates(Terminator,Inst) && PDT.dominates(PDInst, Inst) && PDInst != Inst) {
           Taint = true;
-          Taint_BI.push_back(BI);
+        }
+        if(IsPHINode && BIHeaders.count(Parent)) {
+          Taint = true;
         }
       }
       It++;
     }
 
-    // If the instruction is no in a branch scope, we do not need to taint it.
-    if(Taint) {
-      
+    // If the instruction is not in a branch scope, we do not need to taint it.
+    if(Taint) {      
       Instruction* Current_BI = nullptr;
 
       if(Taint_BI.size() == 1) {
@@ -2050,6 +2070,15 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int 
       Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, { ConstantInt::get(DFS.Integer32, (uint64_t) unified), ConstantInt::get(DFS.Integer32, (uint64_t) BIID.find(Current_BI)->second) });
       
       // Code from combineShadows
+      Instruction *Pos = Inst;
+      if(IsPHINode) {
+        Pos = Parent->getFirstNonPHI();
+      }
+
+      IRBuilder<> IRB(Pos);
+      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, { ConstantInt::get(DFS.Integer32, (uint64_t) unified) });
+      Shadow = combineShadows(Shadow,ScopeLabel,Pos);
+      /*// Code from combineShadows
       auto Key = std::make_pair(Shadow, ScopeLabel);
       if (Shadow > ScopeLabel)
         std::swap(Key.first, Key.second);
@@ -2074,9 +2103,61 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int 
       // ScopeLabel is generated at runtime which is why we cannot know during compile time.
       UnionElems.insert(ScopeLabel);
       ShadowElements[CCS.Shadow] = std::move(UnionElems);
-      Shadow = CCS.Shadow;
+      Shadow = CCS.Shadow;*/
     }
   }
   return Shadow;
+}
+
+int DFSanFunction::getNonDominatingBIID(Instruction *BI) {
+  std::list<Instruction*> NonDom_BIs; 
+  std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
+  while(It != BIPD.end()) {
+    BasicBlock *BB = It->second;
+    Instruction *PDInst = BB->getFirstNonPHI();
+    Instruction *BIInst = It->first;
+    if(DT.dominates(BIInst,BI) && PDT.dominates(PDInst, BI)) {
+      NonDom_BIs.push_back(BIInst);
+    }
+    It++;
+  }
+  if(NonDom_BIs.size() == 0) {
+    return -1;
+  }
+  Instruction *NonDom_BI = getNonDominatingBI(NonDom_BIs);
+  if(!NonDom_BI) {
+    std::cerr << "There is no NonDom_BI to this BI." << std::endl;
+    exit(1);
+  }
+  return BIIDs.find(NonDom_BI)->second;
+}
+
+Instruction *DFSanFunction::getNonDominatingBI(std::list<Instruction*> NonDom_BIs) {
+  // Get the BI which is not dominating any other BI.
+  Instruction* NonDom_BI = nullptr;
+  if(NonDom_BIs.size() < 1) {
+    return NonDom_BI;
+  }
+
+  if(NonDom_BIs.size() == 1) {
+    return NonDom_BIs.front();
+  }
+  std::list<Instruction*>::iterator ItBI1 = NonDom_BIs.begin();
+  std::list<Instruction*>::iterator ItBI2 = NonDom_BIs.begin();
+
+  while(!NonDom_BI && ItBI1 != NonDom_BIs.end()) {
+    bool NotDominating = true;
+    while(NotDominating && ItBI2 != NonDom_BIs.end()) {
+      if(DT.dominates(*ItBI1,*ItBI2)) {
+        NotDominating = false;
+      }
+      ItBI2++;
+    }
+    if(NotDominating) {
+      NonDom_BI = *ItBI1;
+    }     
+      ItBI1++;
+  }
+  return NonDom_BI;
 }
 // End Region: Implementation Control-flow Analysis
