@@ -58,8 +58,12 @@ int main(int argc, char** argv)
 		}
 		i++;
 	}
-	assert(dfsan_has_label(a_label,dfsan_get_label(sum_a)));
-	assert(dfsan_has_label(dfsan_get_label(sum_b),dfsan_union(dfsan_union(a_label,b_label),c_label)));
-	assert(dfsan_has_label(dfsan_get_label(sum_c),dfsan_union(dfsan_union(a_label,c_label),b_label)));
+	assert(dfsan_has_label(dfsan_get_label(sum_a),a_label));
+	assert(dfsan_has_label(dfsan_get_label(sum_b),a_label));
+	assert(dfsan_has_label(dfsan_get_label(sum_b),b_label));
+	assert(dfsan_has_label(dfsan_get_label(sum_b),c_label));
+	assert(dfsan_has_label(dfsan_get_label(sum_c),a_label));
+	assert(dfsan_has_label(dfsan_get_label(sum_c),b_label));
+	assert(dfsan_has_label(dfsan_get_label(sum_c),c_label));
 	return 0;
 }

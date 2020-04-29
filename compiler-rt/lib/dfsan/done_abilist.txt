@@ -38,6 +38,16 @@ fun:dfsan_control_replace=uninstrumented
 fun:dfsan_control_replace=discard
 fun:dfsan_control_scope_label=uninstrumented
 fun:dfsan_control_scope_label=discard
+fun:dfsan_control_leave=uninstrumented
+fun:dfsan_control_leave=discard
+fun:dfsan_contains=uninstrumented
+fun:dfsan_contains=discard
+fun:dfsan_combine_children=uninstrumented
+fun:dfsan_combine_children=discard
+fun:dfsan_get_children=uninstrumented
+fun:dfsan_get_children=discard
+fun:dfsan_exists=uninstrumented
+fun:dfsan_exists=discard
 
 ###############################################################################
 # glibc

@@ -27,6 +27,14 @@
 
 #include "dfsan/dfsan.h"
 
+// Start Region: Implementation Control-flow Analysis
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
+// End Region: Implementation Control-flow Analysis
+
 using namespace __dfsan;
 
 typedef atomic_uint16_t atomic_dfsan_label;
@@ -158,32 +166,255 @@ static void dfsan_check_label(dfsan_label label) {
   }
 }
 
-static bool dfsan_contains(dfsan_label l1, dfsan_label l2)
-{
-  dfsan_label l2_l1 = __dfsan_label_info[l2].l1;
-  dfsan_label l2_l2 = __dfsan_label_info[l2].l2;
-  if (l2_l1 == l1 || l2_l2 == l1)
-    return true;
-  if(l2_l1) {
-    if (l1 > l2_l1) {
-      if(dfsan_contains(l2_l1, l1))
-        return true;
-    } else {
-      if(dfsan_contains(l1, l2_l1))
-        return true;
+// Start Region: Implementation Control-flow Analysis
+// Checks whether label l1 contains label l2
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
+int dfsan_contains(dfsan_label l1, dfsan_label l2) {
+  struct dfsan_label_info l1_info = __dfsan_label_info[l1];
+  struct dfsan_label_info l2_info = __dfsan_label_info[l2];
+  dfsan_label l1_l1 = l1_info.l1;
+  dfsan_label l1_l2 = l1_info.l2;
+  dfsan_label l2_l1 = l2_info.l1;
+  dfsan_label l2_l2 = l2_info.l2;
+
+  // If l2 matches any child of l1 or itself, l1 contains l2.
+  if(l1 == l2 || l1_l2 == l2 || l1_l1 == l2) {
+    return 1;
+  }
+
+  // If both children of l2 are zero, we have an original label.
+  if(!l2_l1 && !l2_l2) {
+    // If both children of l1 are zero, we have an original label.
+    if(!l1_l1 && !l1_l2) {
+      return 0;
+    }
+    // If both children of l1 are non-zero, we need to check whether the parent label
+    // l2 is contained in either l1_l1 or l1_l2. Here, it does not matter in which it
+    // is found because l1 is the union of l1_l1 with l1_l2 and would therefore contain l2.
+    // Here, we reduce label l1 which should ensure termination.
+    else if(l1_l1 && l1_l2){
+      return dfsan_contains(l1_l1,l2) || dfsan_contains(l1_l2,l2);
+    }
+    // If there is a single child of l1 that is zero, it is a faulty label. A union of a
+    // non-zero and a zero label is interrupted and the unified label is set
+    // to the non-zero label.
+    else {
+      printf("dfsan_contains l1\n");
+      printf("Label %d: union(%d,%d)\n", l1,l1_l1,l1_l2);
+      Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
+      Die();
     }
   }
-  if(l2_l2) {
-    if (l1 > l2_l2) {
-      if(dfsan_contains(l2_l2, l1))
-        return true;
-    } else {
-      if(dfsan_contains(l1, l2_l2))
-        return true;
-    }
+  // If both children of l2 are non-zero, we can check whether l2_l1 and l2_l2 are contained
+  // in l1. Both of them must occur in l1 since if one or the other does not, neither does
+  // their union. Here, we reduce label l2 which should ensure termination.
+  else if(l2_l1 && l2_l2) {
+    return dfsan_contains(l1,l2_l1) && dfsan_contains(l1,l2_l2);
   }
-  return false;
+  // If there is a single child of l2 that is zero, it is a faulty label. A union of a
+  // non-zero and a zero label is interrupted and the unified label is set
+  // to the non-zero label.
+  else {
+    printf("dfsan_contains l2\n");
+    printf("Label %d: union(%d,%d)\n", l2,l2_l1,l2_l2);
+    Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
+    Die();
+  }
 }
+
+// Needed to sort the array
+int less_than(const void* a, const void* b) {
+  return (*(dfsan_label*) a > *(dfsan_label*) b);
+}
+
+// Removes duplicate labels from an array and sorts it.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
+dfsan_label* dfsan_remove_sort(dfsan_label* array) {
+  dfsan_label size = array[0];
+  dfsan_label new_size = 1;
+  for(dfsan_label i = 1; i < size; i++) {
+    new_size += !(!array[i]);
+    for(dfsan_label j = i+1; j < size; j++) {
+      if(array[i] == array[j]) {
+        array[j] = 0;
+      }
+    }
+  }
+  dfsan_label* new_array = (dfsan_label*) malloc(new_size*sizeof(dfsan_label));
+  new_array[0] = new_size;
+  new_size = 1;
+  for(dfsan_label i = 1; i < size; i++) {
+    if(array[i]) {
+      new_array[new_size] = array[i];
+      new_size++;
+    }
+  }
+  free(array);
+  // +1 since we only want the non-size indicators sorted. -1 since we exclude the first entry.
+  qsort(new_array+1,new_size-1,sizeof(dfsan_label),less_than);
+  return new_array;
+}
+
+// Combines two arrays where each first entry is the size of that array and returns
+// an array of the same structure.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
+dfsan_label* dfsan_combine_children(dfsan_label* children_l1, dfsan_label* children_l2) {
+  // Add them to a single array...
+  dfsan_label size_l1 = children_l1[0];
+  dfsan_label size_l2 = children_l2[0];
+  // The size of children_l1 is the amount of labels1 + size indicator l1.
+  // The size of children_l2 is the amount of labels2 + size indicator l2.
+  // The size of children_label is the size of l1 - size indicator l1 + the size of l2 - size indicator l2 + size indicator label.
+  dfsan_label size = size_l1 + size_l2 - 1;
+  dfsan_label* children_label = (dfsan_label*) malloc(size*sizeof(dfsan_label));
+  int i = 0;
+  children_label[i++] = size;
+  while(i < size_l1) {
+    children_label[i] = children_l1[i];
+    i++;
+  }
+  int j = 1;
+  while(j < size_l2) {
+    children_label[i] = children_l2[j];
+    i++;
+    j++;
+  }
+  free(children_l1);
+  free(children_l2);
+  // ...which we can return in the end.
+  return children_label;
+}
+
+// Returns all original labels of a label in an array
+// where position 0 holds the size of the array.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
+dfsan_label* dfsan_get_children(dfsan_label label) {
+  // Get all children and the children of the children.
+  dfsan_label l1 = __dfsan_label_info[label].l1;
+  dfsan_label l2 = __dfsan_label_info[label].l2;
+  // If the label is zero, we have a faulty child since
+  // this must mean that the other child is not zero.
+  if(!label) {
+    printf("dfsan_get_children label\n");
+    printf("Label %d: union(%d,%d)\n",label,l1,l2);
+    Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
+    Die();
+  }
+  // If the children are both zero, we have an original label and can return it.
+  if(!l1 && !l2) {
+    dfsan_label* children_label = (dfsan_label*) malloc(2*sizeof(dfsan_label));
+    children_label[0] = 2;
+    children_label[1] = label;
+    return children_label;
+  }
+
+  if(!l1 || !l2) {
+    printf("dfsan_get_children l1 l2\n");
+    printf("Label %d: union(%d,%d)\n",label,l1,l2);
+    Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
+    Die();
+  }
+  // Otherwise, we need to get the children of the children.
+  dfsan_label* children_l1 = dfsan_get_children(l1);
+  dfsan_label* children_l2 = dfsan_get_children(l2);
+  return dfsan_combine_children(children_l1,children_l2);
+}
+
+// Checks whether there already exists a unified label which consists of the
+// same original labels as l1 and l2.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
+dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
+  // If the last label is an original label, we do not have to check whether it contains
+  // other original labels. Every lower label should also be an original label.
+  if(l1 && (!__dfsan_label_info[l1].l1 ^ !__dfsan_label_info[l1].l2)) {
+    printf("dfsan_exists l1\n");
+    printf("Label %d: union(%d,%d)\n",l1,__dfsan_label_info[l1].l1,__dfsan_label_info[l1].l2);
+    Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
+    Die();
+  }
+  if(l2 && (!__dfsan_label_info[l2].l1 ^ !__dfsan_label_info[l2].l2)) {
+    printf("dfsan_exists l2\n");
+    printf("Label %d: union(%d,%d)\n",l2,__dfsan_label_info[l2].l1,__dfsan_label_info[l2].l2);
+    Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
+    Die();
+  }
+  dfsan_label max_label = atomic_load(&__dfsan_last_label, memory_order_relaxed);
+  dfsan_label max_l1 = __dfsan_label_info[max_label].l1;
+  dfsan_label max_l2 = __dfsan_label_info[max_label].l2;
+  if(!max_l1 && !max_l2) {
+    return 0;
+  }
+  // Get all the original labels of l1 and l2
+  //printf("l1 %d l2 %d\n",l1,l2);
+  dfsan_label* children_l1 = dfsan_get_children(l1);
+  /*for(int i = 0; i < children_l1[0]; i++) {
+    printf("children_l1[%d]: %d\n",i,children_l1[i]);
+  }*/
+  dfsan_label* children_l2 = dfsan_get_children(l2);
+  /*for(int i = 0; i < children_l2[0]; i++) {
+    printf("children_l2[%d]: %d\n",i,children_l2[i]);
+  }*/
+  dfsan_label* combined_children = dfsan_combine_children(children_l1,children_l2);
+  /*for(int i = 0; i < combined_children[0]; i++) {
+    printf("combined_children[%d]: %d\n",i,combined_children[i]);
+  }*/
+  dfsan_label* children = dfsan_remove_sort(combined_children);
+  /*for(int i = 0; i < children[0]; i++) {
+    printf("children[%d]: %d\n",i,children[i]);
+  }*/
+  // For every unified label check whether their children match the children of l1 and l2.
+  dfsan_label* children_max;
+  dfsan_label size = children[0];
+  dfsan_label result = 0;
+  while(0 < max_label) {
+    result = 0;
+    // Same check as above
+    max_l1 = __dfsan_label_info[max_label].l1;
+    max_l2 = __dfsan_label_info[max_label].l2;
+    /*printf("max_label %d\n",max_label);
+    printf("max_l1 %d\n",max_l1);
+    printf("max_l2 %d\n",max_l2);*/
+    if(max_label && (!max_l1 ^ !max_l2)) {
+      printf("dfsan_exists max_label\n");
+      printf("Label %d: union(%d,%d)\n",max_label,max_l1,max_l2);
+      Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
+      Die();
+    }
+    if(!max_l1 && !max_l2) {
+      return 0;
+    }
+    // If the max_label contains l1 and l2, it may be possible that they
+    // share the same original labels.
+    if(dfsan_contains(max_label,l1) && dfsan_contains(max_label,l2)) {
+      children_max = dfsan_remove_sort(dfsan_get_children(max_label));
+      /*for(int i = 0; i < children_max[0]; i++) {
+        printf("children_max[%d]: %d\n", i,children_max[i]);
+      }*/
+      // If the number of children is not the same, they cannot have
+      // the same children.
+      if(children_max[0] == size) {
+        // For every label in children_max check whether it also occurs in children.
+        for(int i = 0; i < size; i++) {
+          // If the children match, we increment the result.
+          // This works since we removed any duplicates from the arrays
+          // and sorted them in increasing order.
+          if(children[i] == children_max[i]) {
+            result++;
+          }
+        }
+        //printf("result: %d\n", result);
+        // If we counted as many matches as there are children, all must have found a match.
+        if(result == size) {
+          return max_label;
+        }
+      }
+    }
+    // Move to the next label which we check on if children match.
+    max_label--;
+  }
+  return 0;
+}
+// End Region: Implementation Control-flow Analysis
 
 // Resolves the union of two unequal labels.  Nonequality is a precondition for
 // this function (the instrumentation pass inlines the equality test).
@@ -198,9 +429,6 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
   if (l2 == 0)
     return l1;
 
-  if (l1 > l2)
-    Swap(l1, l2);
-
   atomic_dfsan_label *table_ent = union_table(l1, l2);
   // We need to deal with the case where two threads concurrently request
   // a union of the same pair of labels.  If the table entry is uninitialized,
@@ -213,9 +441,18 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
     // subsumes l2 because we are guaranteed here that l1 < l2, and (at least
     // in the cases we are interested in) a label may only subsume labels
     // created earlier (i.e. with a lower numerical value).
-    if (dfsan_contains(l1, l2)) {                                                                                                                                                                                                                                                                                         
+    dfsan_label exists = dfsan_exists(l1,l2);
+    //if (__dfsan_label_info[l2].l1 == l1 || __dfsan_label_info[l2].l2 == l1) {
+    if(dfsan_contains(l1,l2)) {
+      label = l1;
+    }
+    else if(dfsan_contains(l2,l1)) {
       label = l2;
-    } else {
+    }
+    else if(exists) {
+      label = exists;
+    }
+    else {
       label =
         atomic_fetch_add(&__dfsan_last_label, 1, memory_order_relaxed) + 1;
       dfsan_check_label(label);
@@ -486,21 +723,22 @@ static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 #endif
 
 // Start Region: Implementation Control-flow Analysis
-
 // Explicit control flow taint analysis is implemented here.
 // We taint any operand inside the scope of the control structure with
 // the taint incorporated by the condition to enter the control structure.
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/types.h>
-#include <unistd.h>
 // Size of the data structure for control labels and switches.
-static thread_local int __dfsan_control_array_size = 32;
+static int __dfsan_control_array_size = 32;
 // Data Structure to save the current value of the unified control label.
-static thread_local dfsan_label *__dfsan_control_split_labels = NULL;
+static dfsan_label *__dfsan_control_split_labels = NULL;
 // Data Structure to save the current value of the unified control label.
-static thread_local dfsan_label *__dfsan_control_unified_labels = NULL;
+static dfsan_label *__dfsan_control_unified_labels = NULL;
+// Data Structure to save the current value of the unified control label.
+static dfsan_label *__dfsan_control_switch_labels = NULL;
+// Data Structure to save the current value of the unified control label.
+static int __dfsan_control_active_bi_id = -1;
+// Data Structure to save the current value of the unified control label.
+static int __dfsan_control_depth = 0;
+
 
 // Increases array size to fit id
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -511,78 +749,116 @@ __dfsan_control_increase_array_size(int id) {
       new_array_size *= 2;
     }
 
-    dfsan_label *new_array_split_labels = (dfsan_label *) malloc(new_array_size*sizeof(dfsan_label));
+    dfsan_label *new_array_split_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
     memcpy(new_array_split_labels, __dfsan_control_split_labels, __dfsan_control_array_size*sizeof(dfsan_label));
     free(__dfsan_control_split_labels);
     __dfsan_control_split_labels = new_array_split_labels;
 
-    dfsan_label *new_array_unified_labels = (dfsan_label *) malloc(new_array_size*sizeof(dfsan_label));
+    dfsan_label *new_array_unified_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
     memcpy(new_array_unified_labels, __dfsan_control_unified_labels, __dfsan_control_array_size*sizeof(dfsan_label));
     free(__dfsan_control_unified_labels);
     __dfsan_control_unified_labels = new_array_unified_labels;
+
+    dfsan_label *new_array_switch_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
+    memcpy(new_array_switch_labels, __dfsan_control_switch_labels, __dfsan_control_array_size*sizeof(dfsan_label));
+    free(__dfsan_control_switch_labels);
+    __dfsan_control_switch_labels = new_array_switch_labels;
   }
   return;
 }
 
 // Called when entering a control structure such as for, if, while, etc.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_enter (dfsan_label label, int bi_id, int preceding_bi_id) {
+__dfsan_control_enter (dfsan_label label, int bi_id) {
   if(!__dfsan_control_unified_labels) {
-    __dfsan_control_unified_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
-    __dfsan_control_split_labels = (dfsan_label *) malloc(__dfsan_control_array_size*sizeof(dfsan_label));
+    __dfsan_control_split_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
+    __dfsan_control_unified_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
+    __dfsan_control_switch_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
   }
-
-  __dfsan_control_increase_array_size(bi_id > preceding_bi_id ? bi_id : preceding_bi_id);
+  __dfsan_control_depth++;
+  __dfsan_control_increase_array_size(bi_id);
   __dfsan_control_split_labels[bi_id] = label;
-  if(preceding_bi_id == -1){
-    __dfsan_control_unified_labels[bi_id] = label;
-  }
-  else {
-    __dfsan_control_unified_labels[bi_id] = dfsan_union(__dfsan_control_unified_labels[preceding_bi_id],label);
-  }
+  __dfsan_control_switch_labels[bi_id] = __dfsan_control_depth;
+  __dfsan_control_active_bi_id = bi_id;
+  //if(label != 0) {
+    //printf("bi_id %d\n", bi_id);
+    //printf("set split[bi_id] to %d\n", __dfsan_control_split_labels[bi_id]);
+    //printf("set switch[bi_id] to %d\n", __dfsan_control_switch_labels[bi_id]);
+  //}
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_enter (dfsan_label label) {
-  return __dfsan_control_enter(label, 1, 0);
+  return __dfsan_control_enter(label, 1);
 }
 
 // Called after computing the condition for a loop structure to replace the current taint label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_replace (dfsan_label label, int bi_id, int preceding_bi_id) {
-  __dfsan_control_increase_array_size(bi_id > preceding_bi_id ? bi_id : preceding_bi_id);
+__dfsan_control_replace (dfsan_label label, int bi_id) {
+  __dfsan_control_increase_array_size(bi_id);
   __dfsan_control_split_labels[bi_id] = label;
-  if(preceding_bi_id == -1) {
-    __dfsan_control_unified_labels[bi_id] = label;
-  }
-  else {
-    __dfsan_control_unified_labels[bi_id] = dfsan_union(__dfsan_control_unified_labels[preceding_bi_id],label);
-  }
+  __dfsan_control_switch_labels[bi_id] = __dfsan_control_depth;
+  __dfsan_control_active_bi_id = bi_id;
+  //printf("bi_id %d\n", bi_id);
+  //printf("set split[bi_id] to %d\n", __dfsan_control_split_labels[bi_id]);
+  //printf("set switch[bi_id] to %d\n", __dfsan_control_switch_labels[bi_id]);
+  return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_replace (dfsan_label label) {
-  return __dfsan_control_replace(label, 1, 0);
+  return __dfsan_control_replace(label, 1);
 }
 
 // Called when we need the label of the current control structure. If true we return the unified label, otherwise we return the split label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-__dfsan_control_scope_label (int bi_id, int unified) {
-  if(bi_id >= __dfsan_control_array_size) {
+__dfsan_control_scope_label (int unified) {
+  if(unified) {
+    dfsan_label unionLabel = 0;
+    for(int i = 0; i < __dfsan_control_array_size; i++) {
+      if(__dfsan_control_switch_labels[i]) {
+        unionLabel = dfsan_union(unionLabel,__dfsan_control_split_labels[i]);
+      }
+    }
+    return unionLabel;
+  }
+  if(__dfsan_control_switch_labels[__dfsan_control_active_bi_id]) {
+    return __dfsan_control_split_labels[__dfsan_control_active_bi_id];
+  }
+  else {
     return 0;
   }
-  if(unified) {
-    return __dfsan_control_unified_labels[bi_id];
-  }
-  return __dfsan_control_split_labels[bi_id];
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-dfsan_control_scope_label (int bi_id, int unified) {
-  return __dfsan_control_scope_label(bi_id, unified);
+dfsan_control_scope_label (int unified) {
+  for(int i = 0; i < __dfsan_control_array_size; i++) {
+    if(__dfsan_control_switch_labels[i]) {
+      printf("Scope label contains %d\n", __dfsan_control_split_labels[i]);
+    }
+  }
+  return __dfsan_control_scope_label(unified);
+}
+
+// Called when we leave a control structure.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
+__dfsan_control_leave (int bi_id) {
+  __dfsan_control_switch_labels[bi_id] = 0;
+  int max_control_depth = 0;
+  for(int i = 0; i < __dfsan_control_array_size; i++) {
+    if(__dfsan_control_switch_labels[i] > max_control_depth) {
+      max_control_depth = __dfsan_control_switch_labels[i];
+      __dfsan_control_active_bi_id = i;
+    }
+  }
+  return;
+}
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
+dfsan_control_leave (void) {
+  return __dfsan_control_leave(1);
 }
 
 // export PATH=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build/bin/:$PATH
-// clang++ -mllvm -disable-llvm-optzns test.cpp -S -emit-llvm
-// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt test.ll -o test_opt.ll
+// clang++ -Xclang -disable-O0-optnone test.cpp -S -emit-llvm
+// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt test.ll -o test_opt.ll -S
 // llc -relocation-model=pic -filetype=obj test_opt.ll
 // clang++ -fsanitize=dataflow test_opt.o
 // cmake -DLLVM_ENABLE_PROJECTS="clang;compiler-rt;libcxx;libcxxabi" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$(pwd)/../install ../llvm
@@ -595,4 +871,6 @@ dfsan_control_scope_label (int bi_id, int unified) {
 // DFSAN_OPTIONS=warn_unimplemented=0 mpirun -n 1 ./a.out -s 2 > OUT 2>&1
 // perf-taint
 // opt -load /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libDfsanInstrument.so -extrap-extractor -dfsan -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -S name.ll -o name_opt.ll && llc -relocation-model=pic -filetype=obj name_opt.ll && clang++ -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build_libcxx/lib -Wl,--start-group,-lc++abi /usr/lib/x86_64-linux-gnu/openmpi/lib/libmpi.so /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libdfsan_runtime.a name_opt.o && DFSAN_OPTIONS=warn_unimplemented=0 mpiexec -n 2 a.out
+// testing
+// clang++ -Xclang -disable-O0-optnone test_dfsan.cpp -emit-llvm -S && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt test_dfsan.ll -o test_dfsan_opt.ll -S && llc -relocation-model=pic -filetype=obj test_dfsan_opt.ll && clang++ -fsanitize=dataflow test_dfsan_opt.o && ./a.out > test_dfsan.out
 // End Region: Implementation Control-flow Analysis

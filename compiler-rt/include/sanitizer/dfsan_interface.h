@@ -114,7 +114,13 @@ void dfsan_control_enter (dfsan_label label);
 // Replaces the control scope label with an updated loop label
 void dfsan_control_replace (dfsan_label label);
 // Returns the label of the scope with the specific bi_id
-dfsan_label dfsan_control_scope_label (int bi_id, int unified);
+dfsan_label dfsan_control_scope_label (int unified);
+// Returns the label of the scope with the specific bi_id
+void dfsan_control_leave (void);
+int dfsan_contains(dfsan_label l1, dfsan_label l2);
+dfsan_label* dfsan_combine_children(dfsan_label* children_l1, dfsan_label* children_l2);
+dfsan_label* dfsan_get_children(dfsan_label label);
+dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2);
 // End Region: Implementation Control-flow Analysis
 #ifdef __cplusplus
 }  // extern "C"
