@@ -429,6 +429,9 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
   if (l2 == 0)
     return l1;
 
+  if (l1 > l2)
+    Swap(l1, l2);
+
   atomic_dfsan_label *table_ent = union_table(l1, l2);
   // We need to deal with the case where two threads concurrently request
   // a union of the same pair of labels.  If the table entry is uninitialized,
