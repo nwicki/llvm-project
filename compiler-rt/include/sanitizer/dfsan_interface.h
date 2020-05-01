@@ -111,8 +111,6 @@ void dfsan_weak_hook_strncmp(void *caller_pc, const char *s1, const char *s2,
 // Start Region: Implementation Control-flow Analysis
 // Raises the depth of control flow tainting
 void dfsan_control_enter (dfsan_label label);
-// Replaces the control scope label with an updated loop label
-void dfsan_control_replace (dfsan_label label);
 // Returns the label of the scope with the specific bi_id
 dfsan_label dfsan_control_scope_label (int unified);
 // Returns the label of the scope with the specific bi_id

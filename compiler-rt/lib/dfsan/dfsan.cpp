@@ -778,16 +778,13 @@ __dfsan_control_enter (dfsan_label label, int bi_id) {
     __dfsan_control_unified_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
     __dfsan_control_switch_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
   }
-  __dfsan_control_depth++;
+  if(!__dfsan_control_switch_labels[bi_id]) {
+    __dfsan_control_depth++;
+  }
   __dfsan_control_increase_array_size(bi_id);
   __dfsan_control_split_labels[bi_id] = label;
   __dfsan_control_switch_labels[bi_id] = __dfsan_control_depth;
   __dfsan_control_active_bi_id = bi_id;
-  //if(label != 0) {
-    //printf("bi_id %d\n", bi_id);
-    //printf("set split[bi_id] to %d\n", __dfsan_control_split_labels[bi_id]);
-    //printf("set switch[bi_id] to %d\n", __dfsan_control_switch_labels[bi_id]);
-  //}
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -795,26 +792,12 @@ dfsan_control_enter (dfsan_label label) {
   return __dfsan_control_enter(label, 1);
 }
 
-// Called after computing the condition for a loop structure to replace the current taint label.
-extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-__dfsan_control_replace (dfsan_label label, int bi_id) {
-  __dfsan_control_increase_array_size(bi_id);
-  __dfsan_control_split_labels[bi_id] = label;
-  __dfsan_control_switch_labels[bi_id] = __dfsan_control_depth;
-  __dfsan_control_active_bi_id = bi_id;
-  //printf("bi_id %d\n", bi_id);
-  //printf("set split[bi_id] to %d\n", __dfsan_control_split_labels[bi_id]);
-  //printf("set switch[bi_id] to %d\n", __dfsan_control_switch_labels[bi_id]);
-  return;
-}
-extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
-dfsan_control_replace (dfsan_label label) {
-  return __dfsan_control_replace(label, 1);
-}
-
 // Called when we need the label of the current control structure. If true we return the unified label, otherwise we return the split label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 __dfsan_control_scope_label (int unified) {
+  if(!__dfsan_control_split_labels) {
+    return 0;
+  }
   if(unified) {
     dfsan_label unionLabel = 0;
     for(int i = 0; i < __dfsan_control_array_size; i++) {
@@ -852,6 +835,10 @@ __dfsan_control_leave (int bi_id) {
       __dfsan_control_active_bi_id = i;
     }
   }
+  if(max_control_depth == 0) {
+    __dfsan_control_active_bi_id = 0;
+  }
+  __dfsan_control_increase_array_size(__dfsan_control_active_bi_id);
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -876,4 +863,5 @@ dfsan_control_leave (void) {
 // opt -load /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libDfsanInstrument.so -extrap-extractor -dfsan -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -S name.ll -o name_opt.ll && llc -relocation-model=pic -filetype=obj name_opt.ll && clang++ -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build_libcxx/lib -Wl,--start-group,-lc++abi /usr/lib/x86_64-linux-gnu/openmpi/lib/libmpi.so /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libdfsan_runtime.a name_opt.o && DFSAN_OPTIONS=warn_unimplemented=0 mpiexec -n 2 a.out
 // testing
 // clang++ -Xclang -disable-O0-optnone test_dfsan.cpp -emit-llvm -S && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt test_dfsan.ll -o test_dfsan_opt.ll -S && llc -relocation-model=pic -filetype=obj test_dfsan_opt.ll && clang++ -fsanitize=dataflow test_dfsan_opt.o && ./a.out > test_dfsan.out
+// clang++ -Xclang -disable-O0-optnone test.cpp -emit-llvm -S -o temp123.ll && opt -mem2reg temp123.ll -o temp123_mem2reg.ll && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt temp123_mem2reg.ll -o temp123_opt.ll -S && llc -relocation-model=pic -filetype=obj temp123_opt.ll && clang++ -fsanitize=dataflow temp123_opt.o && ./a.out
 // End Region: Implementation Control-flow Analysis
