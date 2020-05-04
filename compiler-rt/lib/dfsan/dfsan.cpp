@@ -459,6 +459,7 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
       label =
         atomic_fetch_add(&__dfsan_last_label, 1, memory_order_relaxed) + 1;
       dfsan_check_label(label);
+      //printf("New union with %d and %d to %d\n",l1,l2,label);
       __dfsan_label_info[label].l1 = l1;
       __dfsan_label_info[label].l2 = l2;
     }
@@ -734,13 +735,12 @@ static int __dfsan_control_array_size = 32;
 // Data Structure to save the current value of the unified control label.
 static dfsan_label *__dfsan_control_split_labels = NULL;
 // Data Structure to save the current value of the unified control label.
-static dfsan_label *__dfsan_control_unified_labels = NULL;
-// Data Structure to save the current value of the unified control label.
 static dfsan_label *__dfsan_control_switch_labels = NULL;
 // Data Structure to save the current value of the unified control label.
 static int __dfsan_control_active_bi_id = -1;
 // Data Structure to save the current value of the unified control label.
 static int __dfsan_control_depth = 0;
+static int __print = 0;
 
 
 // Increases array size to fit id
@@ -757,11 +757,6 @@ __dfsan_control_increase_array_size(int id) {
     free(__dfsan_control_split_labels);
     __dfsan_control_split_labels = new_array_split_labels;
 
-    dfsan_label *new_array_unified_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
-    memcpy(new_array_unified_labels, __dfsan_control_unified_labels, __dfsan_control_array_size*sizeof(dfsan_label));
-    free(__dfsan_control_unified_labels);
-    __dfsan_control_unified_labels = new_array_unified_labels;
-
     dfsan_label *new_array_switch_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
     memcpy(new_array_switch_labels, __dfsan_control_switch_labels, __dfsan_control_array_size*sizeof(dfsan_label));
     free(__dfsan_control_switch_labels);
@@ -770,12 +765,14 @@ __dfsan_control_increase_array_size(int id) {
   return;
 }
 
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
+__dfsan_control_scope_label (int unified, int bi_id);
+
 // Called when entering a control structure such as for, if, while, etc.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_enter (dfsan_label label, int bi_id) {
-  if(!__dfsan_control_unified_labels) {
+  if(!__dfsan_control_split_labels) {
     __dfsan_control_split_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
-    __dfsan_control_unified_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
     __dfsan_control_switch_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
   }
   if(!__dfsan_control_switch_labels[bi_id]) {
@@ -783,8 +780,17 @@ __dfsan_control_enter (dfsan_label label, int bi_id) {
   }
   __dfsan_control_increase_array_size(bi_id);
   __dfsan_control_split_labels[bi_id] = label;
-  __dfsan_control_switch_labels[bi_id] = __dfsan_control_depth;
   __dfsan_control_active_bi_id = bi_id;
+  dfsan_label temp = __dfsan_control_switch_labels[bi_id];
+  __dfsan_control_switch_labels[bi_id] = __dfsan_control_depth;
+  /*if (!temp) {
+    __print = 1;
+    printf("Entering branch %d\n", bi_id);
+    printf("unified label %d\n", __dfsan_control_scope_label(1,-1));
+    printf("With split label %d\n", __dfsan_control_scope_label(0,bi_id));
+    printf("\n");
+    __print = 0;
+  }*/
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -794,40 +800,55 @@ dfsan_control_enter (dfsan_label label) {
 
 // Called when we need the label of the current control structure. If true we return the unified label, otherwise we return the split label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-__dfsan_control_scope_label (int unified) {
+__dfsan_control_scope_label (int unified, int bi_id) {
   if(!__dfsan_control_split_labels) {
     return 0;
   }
+  if(bi_id >= __dfsan_control_array_size) {
+    return 0;
+  }
+  if(bi_id != -1 && __dfsan_control_switch_labels[bi_id]) {
+    //printf("Scope label %d\n", __dfsan_control_switch_labels[bi_id]);
+    return __dfsan_control_split_labels[bi_id];
+  }
   if(unified) {
     dfsan_label unionLabel = 0;
+    /*if(__print) {
+      printf("Union of ");
+      fflush(stdout);
+    }*/
     for(int i = 0; i < __dfsan_control_array_size; i++) {
       if(__dfsan_control_switch_labels[i]) {
+        if(__print) {
+          printf("%d ",__dfsan_control_split_labels[i]);
+          fflush(stdout);
+        }
         unionLabel = dfsan_union(unionLabel,__dfsan_control_split_labels[i]);
       }
     }
+    /*if(__print) {
+      printf("results in ");
+      fflush(stdout);
+    }*/
     return unionLabel;
   }
-  if(__dfsan_control_switch_labels[__dfsan_control_active_bi_id]) {
-    return __dfsan_control_split_labels[__dfsan_control_active_bi_id];
-  }
-  else {
-    return 0;
-  }
+  return 0;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
 dfsan_control_scope_label (int unified) {
-  for(int i = 0; i < __dfsan_control_array_size; i++) {
+  /*for(int i = 0; i < __dfsan_control_array_size; i++) {
     if(__dfsan_control_switch_labels[i]) {
       printf("Scope label contains %d\n", __dfsan_control_split_labels[i]);
     }
-  }
-  return __dfsan_control_scope_label(unified);
+  }*/
+  return __dfsan_control_scope_label(unified,__dfsan_control_active_bi_id);
 }
 
 // Called when we leave a control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_leave (int bi_id) {
   __dfsan_control_switch_labels[bi_id] = 0;
+  __dfsan_control_split_labels[bi_id] = 0;
   int max_control_depth = 0;
   for(int i = 0; i < __dfsan_control_array_size; i++) {
     if(__dfsan_control_switch_labels[i] > max_control_depth) {
@@ -863,5 +884,5 @@ dfsan_control_leave (void) {
 // opt -load /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libDfsanInstrument.so -extrap-extractor -dfsan -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -S name.ll -o name_opt.ll && llc -relocation-model=pic -filetype=obj name_opt.ll && clang++ -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build_libcxx/lib -Wl,--start-group,-lc++abi /usr/lib/x86_64-linux-gnu/openmpi/lib/libmpi.so /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libdfsan_runtime.a name_opt.o && DFSAN_OPTIONS=warn_unimplemented=0 mpiexec -n 2 a.out
 // testing
 // clang++ -Xclang -disable-O0-optnone test_dfsan.cpp -emit-llvm -S && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt test_dfsan.ll -o test_dfsan_opt.ll -S && llc -relocation-model=pic -filetype=obj test_dfsan_opt.ll && clang++ -fsanitize=dataflow test_dfsan_opt.o && ./a.out > test_dfsan.out
-// clang++ -Xclang -disable-O0-optnone test.cpp -emit-llvm -S -o temp123.ll && opt -mem2reg temp123.ll -o temp123_mem2reg.ll && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt temp123_mem2reg.ll -o temp123_opt.ll -S && llc -relocation-model=pic -filetype=obj temp123_opt.ll && clang++ -fsanitize=dataflow temp123_opt.o && ./a.out
+// clang++ -Xclang -disable-O0-optnone test.cpp -emit-llvm -S -o temp123.ll && opt -mem2reg temp123.ll -o temp123_mem2reg.ll -S && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt temp123_mem2reg.ll -o temp123_opt.ll -S && llc -relocation-model=pic -filetype=obj temp123_opt.ll && clang++ -fsanitize=dataflow temp123_opt.o && ./a.out
 // End Region: Implementation Control-flow Analysis
