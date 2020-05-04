@@ -345,23 +345,10 @@ dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
     return 0;
   }
   // Get all the original labels of l1 and l2
-  //printf("l1 %d l2 %d\n",l1,l2);
   dfsan_label* children_l1 = dfsan_get_children(l1);
-  /*for(int i = 0; i < children_l1[0]; i++) {
-    printf("children_l1[%d]: %d\n",i,children_l1[i]);
-  }*/
   dfsan_label* children_l2 = dfsan_get_children(l2);
-  /*for(int i = 0; i < children_l2[0]; i++) {
-    printf("children_l2[%d]: %d\n",i,children_l2[i]);
-  }*/
   dfsan_label* combined_children = dfsan_combine_children(children_l1,children_l2);
-  /*for(int i = 0; i < combined_children[0]; i++) {
-    printf("combined_children[%d]: %d\n",i,combined_children[i]);
-  }*/
   dfsan_label* children = dfsan_remove_sort(combined_children);
-  /*for(int i = 0; i < children[0]; i++) {
-    printf("children[%d]: %d\n",i,children[i]);
-  }*/
   // For every unified label check whether their children match the children of l1 and l2.
   dfsan_label* children_max;
   dfsan_label size = children[0];
@@ -371,9 +358,6 @@ dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
     // Same check as above
     max_l1 = __dfsan_label_info[max_label].l1;
     max_l2 = __dfsan_label_info[max_label].l2;
-    /*printf("max_label %d\n",max_label);
-    printf("max_l1 %d\n",max_l1);
-    printf("max_l2 %d\n",max_l2);*/
     if(max_label && (!max_l1 ^ !max_l2)) {
       printf("dfsan_exists max_label\n");
       printf("Label %d: union(%d,%d)\n",max_label,max_l1,max_l2);
@@ -387,9 +371,6 @@ dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
     // share the same original labels.
     if(dfsan_contains(max_label,l1) && dfsan_contains(max_label,l2)) {
       children_max = dfsan_remove_sort(dfsan_get_children(max_label));
-      /*for(int i = 0; i < children_max[0]; i++) {
-        printf("children_max[%d]: %d\n", i,children_max[i]);
-      }*/
       // If the number of children is not the same, they cannot have
       // the same children.
       if(children_max[0] == size) {
@@ -402,7 +383,6 @@ dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
             result++;
           }
         }
-        //printf("result: %d\n", result);
         // If we counted as many matches as there are children, all must have found a match.
         if(result == size) {
           return max_label;
@@ -732,15 +712,10 @@ static void (*dfsan_init_ptr)(int, char **, char **) = dfsan_init;
 // the taint incorporated by the condition to enter the control structure.
 // Size of the data structure for control labels and switches.
 static int __dfsan_control_array_size = 32;
-// Data Structure to save the current value of the unified control label.
-static dfsan_label *__dfsan_control_split_labels = NULL;
-// Data Structure to save the current value of the unified control label.
-static dfsan_label *__dfsan_control_switch_labels = NULL;
-// Data Structure to save the current value of the unified control label.
-static int __dfsan_control_active_bi_id = -1;
-// Data Structure to save the current value of the unified control label.
-static int __dfsan_control_depth = 0;
-static int __print = 0;
+// Data Structure to save the labels of conditions of branch instructions.
+static dfsan_label *__dfsan_control_labels = NULL;
+// Data Structure to record which scopes are active.
+static dfsan_label *__dfsan_control_switches = NULL;
 
 
 // Increases array size to fit id
@@ -753,44 +728,31 @@ __dfsan_control_increase_array_size(int id) {
     }
 
     dfsan_label *new_array_split_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
-    memcpy(new_array_split_labels, __dfsan_control_split_labels, __dfsan_control_array_size*sizeof(dfsan_label));
-    free(__dfsan_control_split_labels);
-    __dfsan_control_split_labels = new_array_split_labels;
+    memcpy(new_array_split_labels, __dfsan_control_labels, __dfsan_control_array_size*sizeof(dfsan_label));
+    free(__dfsan_control_labels);
+    __dfsan_control_labels = new_array_split_labels;
 
     dfsan_label *new_array_switch_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
-    memcpy(new_array_switch_labels, __dfsan_control_switch_labels, __dfsan_control_array_size*sizeof(dfsan_label));
-    free(__dfsan_control_switch_labels);
-    __dfsan_control_switch_labels = new_array_switch_labels;
+    memcpy(new_array_switch_labels, __dfsan_control_switches, __dfsan_control_array_size*sizeof(dfsan_label));
+    free(__dfsan_control_switches);
+    __dfsan_control_switches = new_array_switch_labels;
   }
   return;
 }
 
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-__dfsan_control_scope_label (int unified, int bi_id);
+__dfsan_control_scope_label (int bi_id);
 
 // Called when entering a control structure such as for, if, while, etc.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_enter (dfsan_label label, int bi_id) {
-  if(!__dfsan_control_split_labels) {
-    __dfsan_control_split_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
-    __dfsan_control_switch_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
-  }
-  if(!__dfsan_control_switch_labels[bi_id]) {
-    __dfsan_control_depth++;
+  if(!__dfsan_control_labels) {
+    __dfsan_control_labels = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
+    __dfsan_control_switches = (dfsan_label *) calloc(__dfsan_control_array_size,sizeof(dfsan_label));
   }
   __dfsan_control_increase_array_size(bi_id);
-  __dfsan_control_split_labels[bi_id] = label;
-  __dfsan_control_active_bi_id = bi_id;
-  dfsan_label temp = __dfsan_control_switch_labels[bi_id];
-  __dfsan_control_switch_labels[bi_id] = __dfsan_control_depth;
-  /*if (!temp) {
-    __print = 1;
-    printf("Entering branch %d\n", bi_id);
-    printf("unified label %d\n", __dfsan_control_scope_label(1,-1));
-    printf("With split label %d\n", __dfsan_control_scope_label(0,bi_id));
-    printf("\n");
-    __print = 0;
-  }*/
+  __dfsan_control_labels[bi_id] = label;
+  __dfsan_control_switches[bi_id] = 1;
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
@@ -800,66 +762,37 @@ dfsan_control_enter (dfsan_label label) {
 
 // Called when we need the label of the current control structure. If true we return the unified label, otherwise we return the split label.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-__dfsan_control_scope_label (int unified, int bi_id) {
-  if(!__dfsan_control_split_labels) {
+__dfsan_control_scope_label (int bi_id) {
+  if(!__dfsan_control_labels) {
     return 0;
   }
   if(bi_id >= __dfsan_control_array_size) {
     return 0;
   }
-  if(bi_id != -1 && __dfsan_control_switch_labels[bi_id]) {
-    //printf("Scope label %d\n", __dfsan_control_switch_labels[bi_id]);
-    return __dfsan_control_split_labels[bi_id];
+  if(bi_id != -1 && __dfsan_control_switches[bi_id]) {
+    return __dfsan_control_labels[bi_id];
   }
-  if(unified) {
+  else if(bi_id == -1) {
     dfsan_label unionLabel = 0;
-    /*if(__print) {
-      printf("Union of ");
-      fflush(stdout);
-    }*/
     for(int i = 0; i < __dfsan_control_array_size; i++) {
-      if(__dfsan_control_switch_labels[i]) {
-        if(__print) {
-          printf("%d ",__dfsan_control_split_labels[i]);
-          fflush(stdout);
-        }
-        unionLabel = dfsan_union(unionLabel,__dfsan_control_split_labels[i]);
+      if(__dfsan_control_switches[i]) {
+        unionLabel = dfsan_union(unionLabel,__dfsan_control_labels[i]);
       }
     }
-    /*if(__print) {
-      printf("results in ");
-      fflush(stdout);
-    }*/
     return unionLabel;
   }
   return 0;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-dfsan_control_scope_label (int unified) {
-  /*for(int i = 0; i < __dfsan_control_array_size; i++) {
-    if(__dfsan_control_switch_labels[i]) {
-      printf("Scope label contains %d\n", __dfsan_control_split_labels[i]);
-    }
-  }*/
-  return __dfsan_control_scope_label(unified,__dfsan_control_active_bi_id);
+dfsan_control_scope_label (int bi_id) {
+  return __dfsan_control_scope_label(bi_id);
 }
 
 // Called when we leave a control structure.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 __dfsan_control_leave (int bi_id) {
-  __dfsan_control_switch_labels[bi_id] = 0;
-  __dfsan_control_split_labels[bi_id] = 0;
-  int max_control_depth = 0;
-  for(int i = 0; i < __dfsan_control_array_size; i++) {
-    if(__dfsan_control_switch_labels[i] > max_control_depth) {
-      max_control_depth = __dfsan_control_switch_labels[i];
-      __dfsan_control_active_bi_id = i;
-    }
-  }
-  if(max_control_depth == 0) {
-    __dfsan_control_active_bi_id = 0;
-  }
-  __dfsan_control_increase_array_size(__dfsan_control_active_bi_id);
+  __dfsan_control_switches[bi_id] = 0;
+  __dfsan_control_labels[bi_id] = 0;
   return;
 }
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE void

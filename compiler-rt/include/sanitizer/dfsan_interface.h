@@ -109,15 +109,20 @@ void dfsan_weak_hook_strncmp(void *caller_pc, const char *s1, const char *s2,
                              size_t n, dfsan_label s1_label,
                              dfsan_label s2_label, dfsan_label n_label);
 // Start Region: Implementation Control-flow Analysis
-// Raises the depth of control flow tainting
+// Called when entering a scope.
 void dfsan_control_enter (dfsan_label label);
-// Returns the label of the scope with the specific bi_id
-dfsan_label dfsan_control_scope_label (int unified);
-// Returns the label of the scope with the specific bi_id
+// Returns the label of the scope with the specific bi_id. -1 returns the unified label.
+dfsan_label dfsan_control_scope_label (int bi_id);
+// Called when leaving a scope.
 void dfsan_control_leave (void);
+// Checks whether a label contains another.
 int dfsan_contains(dfsan_label l1, dfsan_label l2);
+// Combines the array of two array containing labels. First entry holds array size.
 dfsan_label* dfsan_combine_children(dfsan_label* children_l1, dfsan_label* children_l2);
+// Retrieves all base labels of a label. First entry holds array size.
 dfsan_label* dfsan_get_children(dfsan_label label);
+// Checks whether a unified label already exists. Returns the label if so and 0 otherwise.
+// If one contains the other use dfsan_contains first to make sure they do not.
 dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2);
 // End Region: Implementation Control-flow Analysis
 #ifdef __cplusplus

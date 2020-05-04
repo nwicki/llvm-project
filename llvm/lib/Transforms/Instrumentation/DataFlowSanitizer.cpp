@@ -438,11 +438,6 @@ struct DFSanFunction {
   std::unordered_map<Instruction *, BasicBlock *> BIPD;
   std::unordered_map<BasicBlock *, int> HeaderID;
   std::unordered_map<BasicBlock *, int> PDID;
-  std::unordered_map<BasicBlock *, int> BIID;
-  std::unordered_set<BasicBlock *> Headers;
-  std::unordered_set<BasicBlock *> PreHeaders;
-  std::unordered_map<Instruction *, BasicBlock *> BIHeaders;
-  std::unordered_map<Instruction *, BasicBlock *> BIPreHeaders;
 // End Region: Implementation Control-flow Analysis
   struct CachedCombinedShadow {
     BasicBlock *Block;
@@ -646,7 +641,7 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
     Type *DFSanControlEnterArgs[2] { ShadowTy, Integer32 };
     DFSanControlEnterFnTy =
         FunctionType::get(Type::getVoidTy(*Ctx), DFSanControlEnterArgs, /*isVarArg=*/false);
-    Type *DFSanControlScopeLabelArgs[2] { Integer32,Integer32 };
+    Type *DFSanControlScopeLabelArgs[1] { Integer32 };
     DFSanControlScopeLabelFnTy =
         FunctionType::get(ShadowTy, DFSanControlScopeLabelArgs, /*isVarArg=*/false);
     Type *DFSanControlLeaveArgs[1] { Integer32 };
@@ -1073,9 +1068,12 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
           bool IsTerminator = Inst->isTerminator();
           if (!DFSF.SkipInsts.count(Inst) && isa<BranchInst>(Inst)){
             BranchInst *BI = cast<BranchInst>(Inst);
+            // We only consider conditional branches for control flow tainting.
             if(BI->isConditional()) {
               BasicBlock *PD = DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock();
+              // Our branch instruction needs to have an immediate post dominator for our approach to work.
               if(PD) {
+                // Gets the loop of our branch if there is one.
                 Loop *LpTrue = LI->getLoopFor(BI->getSuccessor(0));
                 Loop *Lp = LpTrue ? LpTrue : LI->getLoopFor(BI->getSuccessor(1));
                 BasicBlock *PreHeader = nullptr;
@@ -1083,17 +1081,15 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
                 DFSF.PDID.insert(std::make_pair(PD,++BICount));
                 if(Lp) {
                   PreHeader = Lp->getLoopPreheader();
+                  // Do we necessarily need a preheader?
                   if(PreHeader) {
-                    DFSF.Headers.insert(BI->getParent());
-                    DFSF.BIHeaders.insert(std::make_pair(BI,BI->getParent()));
                     DFSF.HeaderID.insert(std::make_pair(BI->getParent(),BICount));
-                    DFSF.PreHeaders.insert(PreHeader);
-                    DFSF.BIPreHeaders.insert(std::make_pair(BI,PreHeader));
                   }
                 }
 
                 ConstantInt* ID = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) BICount);
                 IRBuilder<> IRBEnter(BI);
+                // The shadow inserted here is a placeholder. It will be replaced during the visitBranchInst call.
                 Instruction* Enter = IRBEnter.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(ShadowTy, 0),ID });
                 DFSF.SkipInsts.insert(Enter);
                 Instruction *FirstNonPHI = PD->getFirstNonPHI();
@@ -1969,10 +1965,13 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
     if(BI.isConditional()) {
       Instruction* BBFirst = &BI.getParent()->front();
       Instruction* Node = BI.getPrevNode();
+      // We search for the control enter function called before our
+      // conditional branch.
       while(Node != BBFirst && !DFSF.isControlEnterFunction(Node)) {
         Node = Node->getPrevNode();
       }
       if(Node != BBFirst) {
+        // And set the scope label to the label of the condition of the branch instruction.
         CallInst* Enter = cast<CallInst>(Node);
         *Enter->arg_begin() = DFSF.getShadow(BI.getCondition());
       }
@@ -1980,6 +1979,7 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
   }
 }
 
+// Checks whether an instruction is a function call to __dfsan_control_enter
 bool DFSanFunction::isControlEnterFunction(Instruction* Inst) {
   if(CallInst *CI = dyn_cast<CallInst>(Inst)) {
     std::string Name = CI->getCalledFunction()->getName().str();
@@ -1995,10 +1995,12 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int 
     BasicBlock *Parent = Inst->getParent();
     std::unordered_map<Instruction *, BasicBlock *>::iterator It = BIPD.begin();
     if(!unified) {
+      // Checks whether a PHI node is in an immediate post-dominator and sets the according ID.
       if(PDID.count(Parent)) {
         ID = PDID.find(Parent)->second;
         Taint = true;
       }
+      // Checks whether a PHI node is in a header of a loop and sets the according ID.
       if(HeaderID.count(Parent)) {
         ID = HeaderID.find(Parent)->second;
         Taint = true;
@@ -2022,36 +2024,16 @@ Value *DFSanFunction::taintWithScopeLabel(Instruction *Inst, Value *Shadow, int 
       if(!unified) {
         Pos = Pos->getParent()->getFirstNonPHI();
       }
+      // Inserts a function call which retrieves the current scope label (either split or unified depending on whether
+      // we taint a store or phi instruction)
       IRBuilder<> IRB(Pos);
-      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, { ConstantInt::get(DFS.Integer32, (uint64_t) unified),ConstantInt::get(DFS.Integer32, (uint64_t) ID)  });
-      //Shadow = combineShadows(Shadow,ScopeLabel,Pos);
-      // Code from combineShadows
-      /*auto Key = std::make_pair(Shadow, ScopeLabel);
-      if (Shadow > ScopeLabel)
-        std::swap(Key.first, Key.second);
-      CachedCombinedShadow &CCS = CachedCombinedShadows[Key];
-
-      if (CCS.Block && DT.dominates(CCS.Block, Pos->getParent()))
-        Shadow = CCS.Shadow;*/
-
+      Value *ScopeLabel = IRB.CreateCall(DFS.DFSanControlScopeLabelFn, { ConstantInt::get(DFS.Integer32, (uint64_t) ID)  });
+      // And we unify the scope label with the label of the instruction it had before.
       CallInst *Call = IRB.CreateCall(DFS.DFSanCheckedUnionFn, {Shadow, ScopeLabel});
       Call->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
       Call->addParamAttr(0, Attribute::ZExt);
       Call->addParamAttr(1, Attribute::ZExt);
       Shadow = Call;
-      /*CCS.Block = Pos->getParent();
-      CCS.Shadow = Call;
-      auto V1Elems = ShadowElements.find(Shadow);
-      std::set<Value *> UnionElems;
-      if (V1Elems != ShadowElements.end()) {
-        UnionElems = V1Elems->second;
-      } else {
-        UnionElems.insert(Shadow);
-      }
-      // ScopeLabel is generated at runtime which is why we cannot know during compile time.
-      UnionElems.insert(ScopeLabel);
-      ShadowElements[CCS.Shadow] = std::move(UnionElems);
-      Shadow = CCS.Shadow;*/
     }
   }
   return Shadow;
