@@ -727,15 +727,17 @@ __dfsan_control_increase_array_size(int id) {
       new_array_size *= 2;
     }
 
-    dfsan_label *new_array_split_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
-    memcpy(new_array_split_labels, __dfsan_control_labels, __dfsan_control_array_size*sizeof(dfsan_label));
+    dfsan_label *new_array_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
+    memcpy(new_array_labels, __dfsan_control_labels, __dfsan_control_array_size*sizeof(dfsan_label));
     free(__dfsan_control_labels);
-    __dfsan_control_labels = new_array_split_labels;
+    __dfsan_control_labels = new_array_labels;
 
-    dfsan_label *new_array_switch_labels = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
-    memcpy(new_array_switch_labels, __dfsan_control_switches, __dfsan_control_array_size*sizeof(dfsan_label));
+    dfsan_label *new_array_switches = (dfsan_label *) calloc(new_array_size,sizeof(dfsan_label));
+    memcpy(new_array_switches, __dfsan_control_switches, __dfsan_control_array_size*sizeof(dfsan_label));
     free(__dfsan_control_switches);
-    __dfsan_control_switches = new_array_switch_labels;
+    __dfsan_control_switches = new_array_switches;
+
+    __dfsan_control_array_size = new_array_size;
   }
   return;
 }
