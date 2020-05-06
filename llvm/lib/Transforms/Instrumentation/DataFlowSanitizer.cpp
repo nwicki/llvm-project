@@ -1967,10 +1967,10 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
       Instruction* Node = BI.getPrevNode();
       // We search for the control enter function called before our
       // conditional branch.
-      while(Node != BBFirst && !DFSF.isControlEnterFunction(Node)) {
+      while(Node && Node != BBFirst && !DFSF.isControlEnterFunction(Node)) {
         Node = Node->getPrevNode();
       }
-      if(Node != BBFirst) {
+      if(Node && Node != BBFirst) {
         // And set the scope label to the label of the condition of the branch instruction.
         CallInst* Enter = cast<CallInst>(Node);
         *Enter->arg_begin() = DFSF.getShadow(BI.getCondition());
@@ -1982,8 +1982,12 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
 // Checks whether an instruction is a function call to __dfsan_control_enter
 bool DFSanFunction::isControlEnterFunction(Instruction* Inst) {
   if(CallInst *CI = dyn_cast<CallInst>(Inst)) {
-    std::string Name = CI->getCalledFunction()->getName().str();
-    return Name =="__dfsan_control_enter";
+    auto function = CI->getCalledFunction();
+    if(function) {
+      std::string Name = function->getName().str();
+      return Name == "__dfsan_control_enter";
+    }
+    return false;
   }
   return false;
 }
