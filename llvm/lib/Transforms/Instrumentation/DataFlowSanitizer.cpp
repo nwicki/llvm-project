@@ -509,6 +509,7 @@ public:
   void visitMemTransferInst(MemTransferInst &I);
 // Start Region: Implementation Control-flow Analysis
   void visitBranchInst(BranchInst &BI);
+  void visitSwitchInst(SwitchInst &SI);
 // End Region: Implementation Control-flow Analysis
 };
 
@@ -1066,30 +1067,50 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
           // DFSanVisitor may delete Inst, so keep track of whether it was a
           // terminator.
           bool IsTerminator = Inst->isTerminator();
-          if (!DFSF.SkipInsts.count(Inst) && isa<BranchInst>(Inst)){
-            BranchInst *BI = cast<BranchInst>(Inst);
-            // We only consider conditional branches for control flow tainting.
-            if(BI->isConditional()) {
-              BasicBlock *PD = DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock();
-              // Our branch instruction needs to have an immediate post dominator for our approach to work.
-              if(PD) {
-                // Gets the loop of our branch if there is one.
-                Loop *LpTrue = LI->getLoopFor(BI->getSuccessor(0));
-                Loop *Lp = LpTrue ? LpTrue : LI->getLoopFor(BI->getSuccessor(1));
-                BasicBlock *PreHeader = nullptr;
-                DFSF.BIPD.insert(std::make_pair(BI,PD));
-                DFSF.PDID.insert(std::make_pair(PD,++BICount));
-                if(Lp) {
-                  PreHeader = Lp->getLoopPreheader();
-                  // Do we necessarily need a preheader?
-                  if(PreHeader) {
-                    DFSF.HeaderID.insert(std::make_pair(BI->getParent(),BICount));
+          if (!DFSF.SkipInsts.count(Inst)) {
+            if (isa<BranchInst>(Inst)) {
+              BranchInst *BI = cast<BranchInst>(Inst);
+              // We consider conditional branches for control flow tainting.
+              if(BI->isConditional()) {
+                BasicBlock *PD = DFSF.PDT.getNode(BI->getParent())->getIDom()->getBlock();
+                // Our branch instruction needs to have an immediate post dominator for our approach to work.
+                if(PD) {
+                  // Gets the loop of our branch if there is one.
+                  Loop *LpTrue = LI->getLoopFor(BI->getSuccessor(0));
+                  Loop *Lp = LpTrue ? LpTrue : LI->getLoopFor(BI->getSuccessor(1));
+                  BasicBlock *PreHeader = nullptr;
+                  DFSF.BIPD.insert(std::make_pair(BI,PD));
+                  DFSF.PDID.insert(std::make_pair(PD,++BICount));
+                  if(Lp) {
+                    PreHeader = Lp->getLoopPreheader();
+                    // Do we necessarily need a preheader?
+                    if(PreHeader) {
+                      DFSF.HeaderID.insert(std::make_pair(BI->getParent(),BICount));
+                    }
                   }
+
+                  ConstantInt* ID = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) BICount);
+                  IRBuilder<> IRBEnter(BI);
+                  // The shadow inserted here is a placeholder. It will be replaced during the visitBranchInst call.
+                  Instruction* Enter = IRBEnter.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(ShadowTy, 0),ID });
+                  DFSF.SkipInsts.insert(Enter);
+                  Instruction *FirstNonPHI = PD->getFirstNonPHI();
+                  IRBuilder<> IRBLeave(FirstNonPHI);
+                  Instruction* Leave = IRBLeave.CreateCall(DFSF.DFS.DFSanControlLeaveFn, { ID });
+                  DFSF.SkipInsts.insert(Leave);
                 }
+              }
+            }
+            else if(isa<SwitchInst>(Inst)) {
+              BasicBlock *PD = DFSF.PDT.getNode(Inst->getParent())->getIDom()->getBlock();
+              // Our switch instruction needs to have an immediate post dominator for our approach to work.
+              if(PD) {
+                DFSF.BIPD.insert(std::make_pair(Inst,PD));
+                DFSF.PDID.insert(std::make_pair(PD,++BICount));
 
                 ConstantInt* ID = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) BICount);
-                IRBuilder<> IRBEnter(BI);
-                // The shadow inserted here is a placeholder. It will be replaced during the visitBranchInst call.
+                IRBuilder<> IRBEnter(Inst);
+                // The shadow inserted here is a placeholder. It will be replaced during the visitSwitchInst call.
                 Instruction* Enter = IRBEnter.CreateCall(DFSF.DFS.DFSanControlEnterFn, { ConstantInt::get(ShadowTy, 0),ID });
                 DFSF.SkipInsts.insert(Enter);
                 Instruction *FirstNonPHI = PD->getFirstNonPHI();
@@ -1975,6 +1996,23 @@ void DFSanVisitor::visitBranchInst(BranchInst &BI) {
         CallInst* Enter = cast<CallInst>(Node);
         *Enter->arg_begin() = DFSF.getShadow(BI.getCondition());
       }
+    }
+  }
+}
+
+void DFSanVisitor::visitSwitchInst(SwitchInst &SI) {
+  if(ClEnableControlFlowAnalysis){
+    Instruction* BBFirst = &SI.getParent()->front();
+    Instruction* Node = SI.getPrevNode();
+    // We search for the control enter function called before our
+    // switch instruction.
+    while(Node && Node != BBFirst && !DFSF.isControlEnterFunction(Node)) {
+      Node = Node->getPrevNode();
+    }
+    if(Node && Node != BBFirst) {
+      // And set the scope label to the label of the condition of the branch instruction.
+      CallInst* Enter = cast<CallInst>(Node);
+      *Enter->arg_begin() = DFSF.getShadow(SI.getCondition());
     }
   }
 }
