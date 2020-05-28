@@ -880,9 +880,9 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
       DFSanControlLeaveFn =
           Mod->getOrInsertFunction("__dfsan_control_leave", DFSanControlLeaveFnTy);
     }
-    legacy::PassManager *PM = new legacy::PassManager();
-    PM->add(createLoopSimplifyPass());
-    PM->run(M);
+    //legacy::PassManager *PM = new legacy::PassManager();
+    //PM->add(createLoopSimplifyPass());
+    //PM->run(M);
   }
 // End Region: Implementation Control-flow Analysis
   std::vector<Function *> FnsToInstrument;
@@ -1054,19 +1054,19 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
 
     DFSanFunction DFSF(*this, i, FnsWithNativeABI.count(i));
 
-    // Start Region: Implementation Control-flow Analysis
+// Start Region: Implementation Control-flow Analysis
     if(ClEnableControlFlowAnalysis){
       LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>(*i).getLoopInfo();
       for (BasicBlock &bb : *i) {
-        Instruction *Inst = &bb.front();
-        while (true) {
+        Instruction *Inst = bb.getTerminator();
+        /*while (true) {
           // DFSanVisitor may split the current basic block, changing the current
           // instruction's next pointer and moving the next instruction to the
           // tail block from which we should continue.
           Instruction *Next = Inst->getNextNode();
           // DFSanVisitor may delete Inst, so keep track of whether it was a
           // terminator.
-          bool IsTerminator = Inst->isTerminator();
+          bool IsTerminator = Inst->isTerminator();*/
           if (!DFSF.SkipInsts.count(Inst)) {
             if (isa<BranchInst>(Inst)) {
               BranchInst *BI = cast<BranchInst>(Inst);
@@ -1078,15 +1078,15 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
                   // Gets the loop of our branch if there is one.
                   Loop *LpTrue = LI->getLoopFor(BI->getSuccessor(0));
                   Loop *Lp = LpTrue ? LpTrue : LI->getLoopFor(BI->getSuccessor(1));
-                  BasicBlock *PreHeader = nullptr;
+                  //BasicBlock *PreHeader = nullptr;
                   DFSF.BIPD.insert(std::make_pair(BI,PD));
                   DFSF.PDID.insert(std::make_pair(PD,++BICount));
                   if(Lp) {
-                    PreHeader = Lp->getLoopPreheader();
+                    //PreHeader = Lp->getLoopPreheader();
                     // Do we necessarily need a preheader?
-                    if(PreHeader) {
+                    //if(PreHeader) {
                       DFSF.HeaderID.insert(std::make_pair(BI->getParent(),BICount));
-                    }
+                    //}
                   }
 
                   ConstantInt* ID = ConstantInt::get(DFSF.DFS.Integer32, (uint64_t) BICount);
@@ -1120,10 +1120,10 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
               }
             }
           }
-          if (IsTerminator)
+          /*if (IsTerminator)
             break;
-          Inst = Next;
-        }
+          Inst = Next;*/
+        //}
       }
     }
 // End Region: Implementation Control-flow Analysis

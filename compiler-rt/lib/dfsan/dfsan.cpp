@@ -182,9 +182,9 @@ int dfsan_contains(dfsan_label l1, dfsan_label l2) {
     return 1;
   }
 
-  // If both children of l2 are zero, we have an original label.
+  // If both children of l2 are zero, we have a root label.
   if(!l2_l1 && !l2_l2) {
-    // If both children of l1 are zero, we have an original label.
+    // If both children of l1 are zero, we have a root label.
     if(!l1_l1 && !l1_l2) {
       return 0;
     }
@@ -199,8 +199,6 @@ int dfsan_contains(dfsan_label l1, dfsan_label l2) {
     // non-zero and a zero label is interrupted and the unified label is set
     // to the non-zero label.
     else {
-      printf("dfsan_contains l1\n");
-      printf("Label %d: union(%d,%d)\n", l1,l1_l1,l1_l2);
       Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
       Die();
     }
@@ -215,8 +213,6 @@ int dfsan_contains(dfsan_label l1, dfsan_label l2) {
   // non-zero and a zero label is interrupted and the unified label is set
   // to the non-zero label.
   else {
-    printf("dfsan_contains l2\n");
-    printf("Label %d: union(%d,%d)\n", l2,l2_l1,l2_l2);
     Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
     Die();
   }
@@ -285,7 +281,7 @@ dfsan_label* dfsan_combine_children(dfsan_label* children_l1, dfsan_label* child
   return children_label;
 }
 
-// Returns all original labels of a label in an array
+// Returns all root labels of a label in an array
 // where position 0 holds the size of the array.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 dfsan_label* dfsan_get_children(dfsan_label label) {
@@ -295,12 +291,10 @@ dfsan_label* dfsan_get_children(dfsan_label label) {
   // If the label is zero, we have a faulty child since
   // this must mean that the other child is not zero.
   if(!label) {
-    printf("dfsan_get_children label\n");
-    printf("Label %d: union(%d,%d)\n",label,l1,l2);
     Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
     Die();
   }
-  // If the children are both zero, we have an original label and can return it.
+  // If the children are both zero, we have a root label and can return it.
   if(!l1 && !l2) {
     dfsan_label* children_label = (dfsan_label*) malloc(2*sizeof(dfsan_label));
     children_label[0] = 2;
@@ -309,8 +303,6 @@ dfsan_label* dfsan_get_children(dfsan_label label) {
   }
 
   if(!l1 || !l2) {
-    printf("dfsan_get_children l1 l2\n");
-    printf("Label %d: union(%d,%d)\n",label,l1,l2);
     Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
     Die();
   }
@@ -321,20 +313,16 @@ dfsan_label* dfsan_get_children(dfsan_label label) {
 }
 
 // Checks whether there already exists a unified label which consists of the
-// same original labels as l1 and l2.
+// same root labels as l1 and l2.
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
-  // If the last label is an original label, we do not have to check whether it contains
-  // other original labels. Every lower label should also be an original label.
+  // If the last label is a root label, we do not have to check whether it contains
+  // other root labels. Every lower label should also be a root label.
   if(l1 && (!__dfsan_label_info[l1].l1 ^ !__dfsan_label_info[l1].l2)) {
-    printf("dfsan_exists l1\n");
-    printf("Label %d: union(%d,%d)\n",l1,__dfsan_label_info[l1].l1,__dfsan_label_info[l1].l2);
     Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
     Die();
   }
   if(l2 && (!__dfsan_label_info[l2].l1 ^ !__dfsan_label_info[l2].l2)) {
-    printf("dfsan_exists l2\n");
-    printf("Label %d: union(%d,%d)\n",l2,__dfsan_label_info[l2].l1,__dfsan_label_info[l2].l2);
     Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
     Die();
   }
@@ -344,7 +332,7 @@ dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
   if(!max_l1 && !max_l2) {
     return 0;
   }
-  // Get all the original labels of l1 and l2
+  // Get all the root labels of l1 and l2
   dfsan_label* children_l1 = dfsan_get_children(l1);
   dfsan_label* children_l2 = dfsan_get_children(l2);
   dfsan_label* combined_children = dfsan_combine_children(children_l1,children_l2);
@@ -359,8 +347,6 @@ dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
     max_l1 = __dfsan_label_info[max_label].l1;
     max_l2 = __dfsan_label_info[max_label].l2;
     if(max_label && (!max_l1 ^ !max_l2)) {
-      printf("dfsan_exists max_label\n");
-      printf("Label %d: union(%d,%d)\n",max_label,max_l1,max_l2);
       Report("FATAL: DataFlowSanitizer: Label consisting of zero and non-zero labels.\n");
       Die();
     }
@@ -368,7 +354,7 @@ dfsan_label dfsan_exists(dfsan_label l1, dfsan_label l2) {
       return 0;
     }
     // If the max_label contains l1 and l2, it may be possible that they
-    // share the same original labels.
+    // share the same root labels.
     if(dfsan_contains(max_label,l1) && dfsan_contains(max_label,l2)) {
       children_max = dfsan_remove_sort(dfsan_get_children(max_label));
       // If the number of children is not the same, they cannot have
@@ -425,7 +411,6 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
     // in the cases we are interested in) a label may only subsume labels
     // created earlier (i.e. with a lower numerical value).
     dfsan_label exists = dfsan_exists(l1,l2);
-    //if (__dfsan_label_info[l2].l1 == l1 || __dfsan_label_info[l2].l2 == l1) {
     if(dfsan_contains(l1,l2)) {
       label = l1;
     }
@@ -439,7 +424,6 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
       label =
         atomic_fetch_add(&__dfsan_last_label, 1, memory_order_relaxed) + 1;
       dfsan_check_label(label);
-      //printf("New union with %d and %d to %d\n",l1,l2,label);
       __dfsan_label_info[label].l1 = l1;
       __dfsan_label_info[label].l2 = l2;
     }
@@ -801,23 +785,4 @@ extern "C" SANITIZER_INTERFACE_ATTRIBUTE void
 dfsan_control_leave (void) {
   return __dfsan_control_leave(1);
 }
-
-// export PATH=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build/bin/:$PATH
-// clang++ -Xclang -disable-O0-optnone test.cpp -S -emit-llvm
-// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt test.ll -o test_opt.ll -S
-// llc -relocation-model=pic -filetype=obj test_opt.ll
-// clang++ -fsanitize=dataflow test_opt.o
-// cmake -DLLVM_ENABLE_PROJECTS="clang;compiler-rt;libcxx;libcxxabi" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$(pwd)/../install ../llvm
-// LULESH
-// make
-// llvm-link *.bc -o lulesh_complete.bc
-// opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt lulesh_complete.bc -o lulesh_complete_opt.bc
-// llc -relocation-model=pic -filetype=obj lulesh_complete_opt.bc
-// clang++ lulesh_complete_opt.o -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build_libcxx/lib -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi/opal/mca/event/libevent2022/libevent/include -I/usr/lib/x86_64-linux-gnu/openmpi/include -pthread -L/usr//lib -L/usr/lib/x86_64-linux-gnu/openmpi/lib -lmpi_cxx -lmpi -Wl,--start-group,-lc++abi
-// DFSAN_OPTIONS=warn_unimplemented=0 mpirun -n 1 ./a.out -s 2 > OUT 2>&1
-// perf-taint
-// opt -load /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libDfsanInstrument.so -extrap-extractor -dfsan -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -S name.ll -o name_opt.ll && llc -relocation-model=pic -filetype=obj name_opt.ll && clang++ -stdlib=libc++ -fsanitize=dataflow -fsanitize-blacklist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/share/dfsan_abilist.txt -L/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/build_libcxx/lib -Wl,--start-group,-lc++abi /usr/lib/x86_64-linux-gnu/openmpi/lib/libmpi.so /home/negolas/Documents/hs19/bachelor_thesis/project_code/new-cfsan-perf-taint/build/libdfsan_runtime.a name_opt.o && DFSAN_OPTIONS=warn_unimplemented=0 mpiexec -n 2 a.out
-// testing
-// clang++ -Xclang -disable-O0-optnone test_dfsan.cpp -emit-llvm -S && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt test_dfsan.ll -o test_dfsan_opt.ll -S && llc -relocation-model=pic -filetype=obj test_dfsan_opt.ll && clang++ -fsanitize=dataflow test_dfsan_opt.o && ./a.out > test_dfsan.out
-// clang++ -Xclang -disable-O0-optnone test.cpp -emit-llvm -S -o temp123.ll && opt -mem2reg temp123.ll -o temp123_mem2reg.ll -S && opt -dfsan -dfsan-cfsan-enable -dfsan-abilist=/home/negolas/Documents/hs19/bachelor_thesis/project_code/cfsan-llvm-project/dfsan_abilist.txt temp123_mem2reg.ll -o temp123_opt.ll -S && llc -relocation-model=pic -filetype=obj temp123_opt.ll && clang++ -fsanitize=dataflow temp123_opt.o && ./a.out
 // End Region: Implementation Control-flow Analysis
